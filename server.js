@@ -406,6 +406,65 @@ app.post('/api/spaces/:spaceId/leave', async (req, res) => {
   }
 });
 
+app.post('/api/spaces/:spaceId/categories/:categoryId/delete', async (req, res) => {
+  try {
+    const result = await matrix.deleteCategory(req.params.categoryId, {
+      parentSpaceId: req.params.spaceId || req.body?.parentSpaceId || null,
+    });
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ error: error?.message || String(error) });
+  }
+});
+
+app.delete('/api/spaces/:spaceId/children/:childId', async (req, res) => {
+  try {
+    const result = await matrix.removeSpaceChild(req.params.spaceId, req.params.childId);
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ error: error?.message || String(error) });
+  }
+});
+
+app.put('/api/spaces/:spaceId/children/order', async (req, res) => {
+  try {
+    const result = await matrix.reorderSpaceChildren(
+      req.params.spaceId,
+      req.body?.childIds || req.body?.order || [],
+    );
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ error: error?.message || String(error) });
+  }
+});
+
+app.put('/api/spaces/:spaceId/categories/order', async (req, res) => {
+  try {
+    const result = await matrix.reorderSpaceCategories(
+      req.params.spaceId,
+      req.body?.categoryIds || req.body?.childIds || req.body?.order || [],
+    );
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ error: error?.message || String(error) });
+  }
+});
+
+app.post('/api/spaces/:spaceId/children/:childId/move', async (req, res) => {
+  try {
+    const result = await matrix.moveSpaceChild({
+      fromParentId: req.body?.fromParentId || req.params.spaceId,
+      toParentId: req.body?.toParentId || req.body?.parentId || req.params.spaceId,
+      childId: req.params.childId,
+      beforeId: req.body?.beforeId || null,
+      afterId: req.body?.afterId || null,
+    });
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ error: error?.message || String(error) });
+  }
+});
+
 app.get('/api/avatar/:roomId', async (req, res) => {
   if (!matrix.client) {
     res.status(401).json({ error: 'Not logged in' });
@@ -592,20 +651,40 @@ app.post('/api/crypto/setup', async (req, res) => {
   try {
     const result = await matrix.setupEncryption({
       recoveryKey: req.body?.recoveryKey || null,
+      password: req.body?.password || null,
       setupNewCrossSigning: Boolean(req.body?.resetCrossSigning),
       setupBackup: req.body?.setupBackup !== false,
     });
     res.json(result);
   } catch (error) {
+    if (error?.code === 'NEEDS_PASSWORD' || error?.needsPassword) {
+      res.status(401).json({
+        error: error.message || 'Account password required to finish verifying this device',
+        needsPassword: true,
+        session: error.session || null,
+      });
+      return;
+    }
     res.status(400).json({ error: error?.message || String(error) });
   }
 });
 
 app.post('/api/crypto/verify', async (req, res) => {
   try {
-    const result = await matrix.verifyOwnDevice({ recoveryKey: req.body?.recoveryKey });
+    const result = await matrix.verifyOwnDevice({
+      recoveryKey: req.body?.recoveryKey,
+      password: req.body?.password || null,
+    });
     res.json(result);
   } catch (error) {
+    if (error?.code === 'NEEDS_PASSWORD' || error?.needsPassword) {
+      res.status(401).json({
+        error: error.message || 'Account password required to finish verifying this device',
+        needsPassword: true,
+        session: error.session || null,
+      });
+      return;
+    }
     res.status(400).json({ error: error?.message || String(error) });
   }
 });
@@ -621,9 +700,20 @@ app.post('/api/devices/:deviceId/verify', async (req, res) => {
 
 app.post('/api/crypto/backup', async (req, res) => {
   try {
-    const result = await matrix.enableKeyBackup({ recoveryKey: req.body?.recoveryKey });
+    const result = await matrix.enableKeyBackup({
+      recoveryKey: req.body?.recoveryKey,
+      password: req.body?.password || null,
+    });
     res.json(result);
   } catch (error) {
+    if (error?.code === 'NEEDS_PASSWORD' || error?.needsPassword) {
+      res.status(401).json({
+        error: error.message || 'Account password required to finish verifying this device',
+        needsPassword: true,
+        session: error.session || null,
+      });
+      return;
+    }
     res.status(400).json({ error: error?.message || String(error) });
   }
 });
@@ -689,6 +779,19 @@ app.put('/api/account/style', async (req, res) => {
     res.json(result);
   } catch (error) {
     res.status(400).json({ error: error?.message || String(error) });
+  }
+});
+
+app.put('/api/account/presence', async (req, res) => {
+  try {
+    const result = await matrix.setPresenceState(req.body?.presence, {
+      statusMsg: req.body?.statusMsg,
+    });
+    res.json(result);
+  } catch (error) {
+    const message = error?.message || String(error);
+    const rateLimited = /rate-limited|too many requests|\b429\b/i.test(message);
+    res.status(rateLimited ? 429 : 400).json({ error: message });
   }
 });
 
@@ -865,6 +968,25 @@ app.post('/api/invites/:roomId/reject', async (req, res) => {
   }
 });
 
+app.get('/api/explore/rooms', async (req, res) => {
+  try {
+    const roomTypesRaw = String(req.query.roomTypes || req.query.type || '').trim();
+    let roomTypes;
+    if (roomTypesRaw === 'spaces' || roomTypesRaw === 'm.space') roomTypes = ['m.space'];
+    else if (roomTypesRaw === 'rooms' || roomTypesRaw === 'null') roomTypes = [null];
+    const result = await matrix.explorePublicRooms({
+      server: req.query.server,
+      term: req.query.q || req.query.term || '',
+      limit: req.query.limit,
+      since: req.query.since || null,
+      roomTypes,
+    });
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ error: error?.message || String(error) });
+  }
+});
+
 app.post('/api/join', async (req, res) => {
   try {
     const result = await matrix.joinByIdOrAlias(req.body?.id || req.body?.alias || req.body?.link, {
@@ -913,6 +1035,25 @@ app.patch('/api/rooms/:roomId', async (req, res) => {
       topic: req.body?.topic,
       joinRule: req.body?.joinRule || req.body?.join_rule,
     });
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ error: error?.message || String(error) });
+  }
+});
+
+app.post('/api/rooms/:roomId/avatar', async (req, res) => {
+  try {
+    const dataUrl = req.body?.dataUrl || req.body?.image || null;
+    const result = await matrix.uploadRoomAvatar(req.params.roomId, dataUrl);
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ error: error?.message || String(error) });
+  }
+});
+
+app.delete('/api/rooms/:roomId/avatar', async (req, res) => {
+  try {
+    const result = await matrix.removeRoomAvatar(req.params.roomId);
     res.json(result);
   } catch (error) {
     res.status(400).json({ error: error?.message || String(error) });
@@ -1241,6 +1382,46 @@ app.post('/api/rooms/:roomId/send-video', async (req, res) => {
   }
 });
 
+/** Binary file upload (avoids base64 JSON size limits for large attachments). */
+app.post(
+  '/api/rooms/:roomId/send-file',
+  express.raw({ type: () => true, limit: '256mb' }),
+  async (req, res) => {
+    try {
+      const buffer = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || []);
+      if (!buffer.length) {
+        res.status(400).json({ error: 'Empty file' });
+        return;
+      }
+      const filename =
+        String(req.query?.filename || req.get('x-filename') || 'file').trim() || 'file';
+      const contentType =
+        String(req.query?.contentType || req.get('content-type') || 'application/octet-stream')
+          .split(';')[0]
+          .trim() || 'application/octet-stream';
+      const captionHeader = req.get('x-caption');
+      const caption =
+        captionHeader != null && captionHeader !== ''
+          ? (() => {
+              try {
+                return decodeURIComponent(captionHeader);
+              } catch {
+                return captionHeader;
+              }
+            })()
+          : null;
+      const result = await matrix.sendFileBuffer(req.params.roomId, buffer, {
+        contentType,
+        filename,
+        caption,
+      });
+      res.json(result);
+    } catch (error) {
+      res.status(400).json({ error: error?.message || String(error) });
+    }
+  },
+);
+
 app.get('/api/stickers', (_req, res) => {
   try {
     res.json(stickerPacks.listPacks());
@@ -1370,12 +1551,22 @@ app.get('/api/media', async (req, res) => {
     const contentType = response.headers.get('content-type') || 'application/octet-stream';
     const buffer = Buffer.from(await response.arrayBuffer());
     const asDownload = String(req.query.download || '') === '1';
+    const filenameHint = String(req.query.filename || '').trim();
+    let resolvedType = contentType;
+    const looksSvg =
+      /\.svg$/i.test(filenameHint) ||
+      /^image\/svg\+xml/i.test(contentType) ||
+      /^\s*<\?xml[\s\S]*<svg[\s>]/i.test(buffer.toString('utf8', 0, Math.min(buffer.length, 512))) ||
+      /^\s*<svg[\s>]/i.test(buffer.toString('utf8', 0, Math.min(buffer.length, 256)));
+    if (looksSvg && (!contentType || /octet-stream|text\/plain/i.test(contentType))) {
+      resolvedType = 'image/svg+xml';
+    }
     if (asDownload) {
       const filename = String(req.query.filename || 'image').replace(/[^\w.\-()+ ]+/g, '_') || 'image';
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     }
     res.setHeader('Cache-Control', 'private, max-age=300');
-    res.type(contentType);
+    res.type(resolvedType);
     res.send(buffer);
   } catch (error) {
     res.status(500).json({ error: error?.message || String(error) });

@@ -952,12 +952,65 @@
     };
   }
 
+  function getDmSidebarStatus(room) {
+    const myUserId = client?.getUserId?.();
+    const members = room.getJoinedMembers?.() || [];
+    const typingUsers = members.filter(
+      (member) => member?.typing && member.userId && member.userId !== myUserId,
+    );
+    const typing = typingUsers.length > 0;
+    const typingLabel = typing
+      ? typingUsers.length === 1
+        ? 'Typing…'
+        : `${typingUsers.length} typing…`
+      : '';
+    let lastMine = false;
+    let peerRead = false;
+    const peerId = getDmPeerUserId(room);
+    const liveEvents = room.getLiveTimeline?.()?.getEvents?.() || [];
+    for (let i = liveEvents.length - 1; i >= 0; i -= 1) {
+      const ev = liveEvents[i];
+      if (!ev) continue;
+      const type = ev.getType?.();
+      if (type !== 'm.room.message' && type !== 'm.room.encrypted') continue;
+      if (ev.isRedacted?.()) continue;
+      lastMine = ev.getSender?.() === myUserId;
+      if (!lastMine || !peerId) break;
+      const lastId = ev.getId?.();
+      if (!lastId) break;
+      let peerUpTo = null;
+      try {
+        peerUpTo = room.getEventReadUpTo?.(peerId) || null;
+      } catch {
+        peerUpTo = null;
+      }
+      if (!peerUpTo) break;
+      if (peerUpTo === lastId) {
+        peerRead = true;
+        break;
+      }
+      let peerIdx = -1;
+      for (let j = 0; j < liveEvents.length; j += 1) {
+        if (liveEvents[j]?.getId?.() === peerUpTo) {
+          peerIdx = j;
+          break;
+        }
+      }
+      peerRead = peerIdx >= i;
+      break;
+    }
+    return { typing, typingLabel, lastMine, peerRead };
+  }
+
   function serializeRoom(room, { isDirect = false } = {}) {
     const myUserId = client.getUserId();
     let dmUserId = null;
     if (isDirect) dmUserId = getDmPeerUserId(room);
     const last = room.getLastLiveEvent?.() || room.getLiveTimeline?.()?.getEvents?.()?.slice(-1)?.[0];
     const hasAvatar = Boolean(getRoomAvatarRemote(room, 96));
+    const dmStatus = isDirect
+      ? getDmSidebarStatus(room)
+      : { typing: false, typingLabel: '', lastMine: false, peerRead: false };
     return {
       roomId: room.roomId,
       name: room.name || room.roomId,
@@ -970,6 +1023,10 @@
       dmUserId,
       presence: null,
       online: false,
+      typing: dmStatus.typing,
+      typingLabel: dmStatus.typingLabel,
+      lastMine: dmStatus.lastMine,
+      peerRead: dmStatus.peerRead,
       alias: room.getCanonicalAlias?.() || null,
       permalink: `https://matrix.to/#/${room.roomId}`,
       avatarUrl: roomAvatarPath(room.roomId, 96),
@@ -1029,7 +1086,7 @@
       type: clear?.getType?.() || type,
       sender,
       senderName: displayNameFor(sender, room),
-      senderAvatarUrl: profileAvatarPath(sender, 48),
+      senderAvatarUrl: profileAvatarPath(sender, 96),
       hasSenderAvatar: Boolean(getAvatarMxc(sender, room) || client.getUser?.(sender)?.avatarUrl),
       senderStyle: profileStyleCache.get(sender) || null,
       isMine,
@@ -1038,7 +1095,7 @@
       body: redacted ? null : body,
       html: redacted ? null : clearContent.formatted_body || null,
       msgtype: redacted ? null : msgtype,
-      imageUrl: imageMxc ? mxcToHttp(imageMxc, 512) : null,
+      imageUrl: imageMxc ? mxcToHttp(imageMxc, 1280) : null,
       imageFullUrl: imageMxc ? mxcToHttp(imageMxc) : null,
       imageMxc,
       imageFilename: clearContent.body || null,
@@ -1402,7 +1459,7 @@
         for (const target of targets) {
           const events = target.getLiveTimeline?.()?.getEvents?.() || [];
           const last = events[events.length - 1];
-          if (last) await client.sendReadReceipt(last);
+          if (last) await client.sendReadReceipt(last, undefined, true);
         }
       } catch { /* ignore */ }
       return jsonResponse({ ok: true });
@@ -1500,7 +1557,7 @@
         const room = client?.getRoom?.(roomId);
         const events = room?.getLiveTimeline?.()?.getEvents?.() || [];
         const last = events[events.length - 1];
-        if (last) await client.sendReadReceipt(last);
+        if (last) await client.sendReadReceipt(last, undefined, true);
       } catch {
         /* ignore */
       }
@@ -1627,6 +1684,196 @@
       }
     }
 
+    if (path === '/api/explore/rooms' && method === 'GET') {
+      if (!client) return errorResponse('Not logged in', 401);
+      try {
+        const serverName = String(url.searchParams.get('server') || '')
+          .trim()
+          .replace(/^https?:\/\//i, '')
+          .replace(/\/+$/, '')
+          .split('/')[0];
+        if (!serverName) return errorResponse('Server is required', 400);
+        const limit = Math.min(
+          Math.max(Number(url.searchParams.get('limit') || 24) || 24, 1),
+          100,
+        );
+        const term = String(url.searchParams.get('q') || url.searchParams.get('term') || '').trim();
+        const since = url.searchParams.get('since') || null;
+        const roomTypesRaw = String(
+          url.searchParams.get('roomTypes') || url.searchParams.get('type') || '',
+        ).trim();
+        const opts = { server: serverName, limit };
+        if (since) opts.since = since;
+        const filter = {};
+        if (term) filter.generic_search_term = term;
+        if (roomTypesRaw === 'spaces' || roomTypesRaw === 'm.space') filter.room_types = ['m.space'];
+        else if (roomTypesRaw === 'rooms' || roomTypesRaw === 'null') filter.room_types = [null];
+        if (Object.keys(filter).length) opts.filter = filter;
+        const result = await client.publicRooms(opts);
+        const rooms = (result?.chunk || []).map((room) => {
+          const avatarMxc = room?.avatar_url || null;
+          let avatarHttp = null;
+          if (avatarMxc && typeof client.mxcUrlToHttp === 'function') {
+            try {
+              avatarHttp =
+                client.mxcUrlToHttp(avatarMxc, 96, 96, 'crop', false, true, true) || null;
+            } catch {
+              avatarHttp = null;
+            }
+          }
+          return {
+            roomId: room.room_id,
+            name: room.name || room.canonical_alias || room.room_id,
+            topic: room.topic || '',
+            alias: room.canonical_alias || null,
+            avatarUrl: avatarMxc,
+            avatarHttp,
+            memberCount: Number(room.num_joined_members) || 0,
+            joinRule: room.join_rule || null,
+            worldReadable: Boolean(room.world_readable),
+            guestCanJoin: Boolean(room.guest_can_join),
+            roomType: room.room_type || null,
+            isSpace: room.room_type === 'm.space',
+          };
+        });
+        return jsonResponse({
+          server: serverName,
+          rooms,
+          nextBatch: result?.next_batch || null,
+          total: result?.total_room_count_estimate ?? null,
+        });
+      } catch (error) {
+        return errorResponse(error?.message || error, 400);
+      }
+    }
+
+    if (path === '/api/join' && method === 'POST') {
+      if (!client) return errorResponse('Not logged in', 401);
+      try {
+        let value = String(body?.id || body?.alias || body?.link || '').trim();
+        if (!value) return errorResponse('Room ID, alias, or link is required', 400);
+        const matrixTo = value.match(/matrix\.to\/#\/([^?/\s]+)/i);
+        if (matrixTo) value = decodeURIComponent(matrixTo[1]);
+        if (value.startsWith('#') && !value.includes(':')) {
+          const userId = client.getUserId() || '';
+          const domain = userId.includes(':') ? userId.split(':').slice(1).join(':') : '';
+          if (domain) value = `${value}:${domain}`;
+        }
+        const room = await client.joinRoom(value);
+        const roomId = room?.roomId || value;
+        const joined = client.getRoom(roomId) || room;
+        const isSpace = joined ? isSpaceLikeRoom(joined) : false;
+        return jsonResponse({
+          ok: true,
+          roomId,
+          isSpace,
+          joinedChildren: [],
+          summary: joined
+            ? isSpace
+              ? getSpaceSummary(roomId)
+              : serializeRoom(joined)
+            : null,
+        });
+      } catch (error) {
+        return errorResponse(error?.message || error, 400);
+      }
+    }
+
+    if (path === '/api/devices' && method === 'GET') {
+      if (!client) return errorResponse('Not logged in', 401);
+      try {
+        const currentId = client.getDeviceId?.() || null;
+        let devices = [];
+        try {
+          const raw = await client.getDevices?.();
+          devices = Array.isArray(raw?.devices) ? raw.devices : Array.isArray(raw) ? raw : [];
+        } catch {
+          devices = [];
+        }
+        const crypto = client.getCrypto?.();
+        const userId = client.getUserId?.();
+        const mapped = [];
+        for (const device of devices) {
+          const deviceId = device.device_id || device.deviceId;
+          if (!deviceId) continue;
+          let verified = false;
+          if (crypto && userId && typeof crypto.getDeviceVerificationStatus === 'function') {
+            try {
+              const status = await crypto.getDeviceVerificationStatus(userId, deviceId);
+              verified = Boolean(status?.isVerified?.() ?? status?.verified);
+            } catch {
+              verified = false;
+            }
+          }
+          mapped.push({
+            deviceId,
+            displayName: device.display_name || device.displayName || deviceId,
+            lastSeenTs: device.last_seen_ts || device.lastSeenTs || null,
+            lastSeenIp: device.last_seen_ip || device.lastSeenIp || null,
+            isCurrent: Boolean(currentId && deviceId === currentId),
+            verified,
+          });
+        }
+        const current = mapped.find((d) => d.isCurrent);
+        const currentVerified = current ? Boolean(current.verified) : !crypto;
+        const otherUnverifiedCount = mapped.filter((d) => !d.isCurrent && !d.verified).length;
+        const unverifiedCount = currentVerified ? otherUnverifiedCount : 0;
+        return jsonResponse({
+          currentDeviceId: currentId,
+          unverifiedCount,
+          otherUnverifiedCount,
+          currentDeviceUnverified: Boolean(crypto) && !currentVerified,
+          showOtherVerification: currentVerified,
+          security: {
+            verification: currentVerified ? 'verified' : 'unverified',
+            unverifiedCount,
+            otherUnverifiedCount,
+            currentDeviceUnverified: Boolean(crypto) && !currentVerified,
+            showOtherVerification: currentVerified,
+            cryptoEnabled: Boolean(crypto),
+          },
+          devices: mapped,
+        });
+      } catch (error) {
+        return errorResponse(error?.message || error, 400);
+      }
+    }
+
+    const confettiMatch = path.match(/^\/api\/rooms\/([^/]+)\/emoji-confetti$/);
+    if (confettiMatch && method === 'POST') {
+      if (!client) return errorResponse('Not logged in', 401);
+      try {
+        const roomId = decodeURIComponent(confettiMatch[1]);
+        const pool = (Array.isArray(body?.emojis) ? body.emojis : [])
+          .map((entry) => String(entry || '').trim())
+          .filter(Boolean)
+          .slice(0, 12);
+        if (!pool.length) return errorResponse('Emoji list is required', 400);
+        const content = {
+          emojis: pool,
+          msgtype: 'app.relay.emoji_confetti',
+        };
+        const target = String(body?.targetEventId || body?.eventId || '').trim();
+        if (target) content.target_event_id = target;
+        const result = await client.sendEvent(roomId, 'app.relay.emoji_confetti', content);
+        emitLive({
+          kind: 'emoji-confetti',
+          roomId,
+          emojis: pool,
+          targetEventId: target || null,
+          sender: client.getUserId?.() || null,
+          live: true,
+        });
+        return jsonResponse({
+          ok: true,
+          eventId: result?.event_id || null,
+          emojis: pool,
+        });
+      } catch (error) {
+        return errorResponse(error?.message || error, 400);
+      }
+    }
+
     if (path === '/api/account/style' && method === 'PUT') {
       if (!client) return errorResponse('Not logged in', 401);
       try {
@@ -1682,7 +1929,7 @@
         if (path === '/api/stickers') return jsonResponse({ packs: [], favorites: [] });
         if (path === '/api/plugins') return jsonResponse({ plugins: [] });
         if (path === '/api/themes') return jsonResponse({ themes: [] });
-        if (path === '/api/devices') return jsonResponse({ devices: [] });
+        // /api/devices handled above when crypto is available
         if (path === '/api/sidebar') return jsonResponse({ folders: [] });
         if (path.endsWith('/members')) return jsonResponse({ members: [] });
         if (path.endsWith('/pins')) return jsonResponse({ pins: [] });

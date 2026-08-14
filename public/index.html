@@ -63,11 +63,40 @@
         }
       })();
     </script>
-    <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="/style.css?v=0.3.16" />
     <link rel="stylesheet" href="/themes.css" />
   </head>
   <body>
     <div id="app">
+      <header id="desktopTitleBar" class="desktop-titlebar" hidden>
+        <div class="desktop-titlebar-brand-row">
+          <span class="desktop-titlebar-brand">Kitsu</span>
+          <span id="desktopTitleBarSuffix" class="desktop-titlebar-suffix"></span>
+        </div>
+        <div class="window-drag-strip desktop-titlebar-gap" aria-hidden="true"></div>
+        <div class="desktop-titlebar-controls">
+          <button type="button" id="winMinimizeBtn" class="desktop-titlebar-btn" title="Minimize" aria-label="Minimize">
+            <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+              <rect y="5" width="12" height="2" fill="currentColor"/>
+            </svg>
+          </button>
+          <button type="button" id="winMaximizeBtn" class="desktop-titlebar-btn" title="Maximize" aria-label="Maximize">
+            <svg class="desktop-titlebar-max-icon" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+              <rect x="0.75" y="0.75" width="10.5" height="10.5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+            </svg>
+            <svg class="desktop-titlebar-restore-icon" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" hidden>
+              <rect x="2" y="0" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.5"/>
+              <rect x="0" y="2" width="10" height="10" fill="currentColor"/>
+              <rect x="1.5" y="3.5" width="7" height="7" fill="var(--bg)"/>
+            </svg>
+          </button>
+          <button type="button" id="winCloseBtn" class="desktop-titlebar-btn desktop-titlebar-btn--close" title="Close" aria-label="Close">
+            <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+              <path d="M1 1 L11 11 M11 1 L1 11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </button>
+        </div>
+      </header>
       <main id="loginView" class="login-view">
         <section class="login-panel">
           <div class="login-brand">
@@ -82,7 +111,7 @@
                 id="homeserver"
                 name="homeserver"
                 type="text"
-                placeholder="exau.dev or https://matrix.example.com"
+                placeholder="matrix.org or https://matrix.example.com"
                 autocomplete="url"
                 spellcheck="false"
                 required
@@ -121,7 +150,7 @@
           <div class="workspace-rail-stack workspace-rail-stack--dm" aria-label="Direct messages">
             <button
               type="button"
-              class="workspace-rail-btn workspace-rail-btn--home is-active"
+              class="workspace-rail-btn workspace-rail-btn--home"
               data-space="dms"
               title="Direct messages"
               aria-label="Direct messages"
@@ -137,6 +166,29 @@
           <div class="workspace-rail-main" aria-label="Spaces">
             <div id="spaceRailList" class="workspace-rail-spaces"></div>
             <div class="workspace-rail-divider workspace-rail-divider--add" aria-hidden="true"></div>
+            <button
+              type="button"
+              id="railExploreBtn"
+              class="workspace-rail-btn workspace-rail-btn--explore"
+              title="Explore Community"
+              aria-label="Explore Community"
+              aria-pressed="false"
+            >
+              <span class="workspace-rail-orb workspace-rail-orb--tool" aria-hidden="true">
+                <svg class="ui-icon ui-icon--stroke" viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                  <circle cx="12" cy="12" r="9"/>
+                  <path class="ui-icon--fill" d="M16.2 7.8 13.1 13.1 7.8 16.2 10.9 10.9Z"/>
+                </svg>
+              </span>
+            </button>
+            <div id="exploreContextMenu" class="space-menu" hidden role="menu">
+              <button type="button" class="space-menu-item" data-explore-action="hide" role="menuitem">
+                <span>Hide Explore Community</span>
+                <span class="space-menu-icon" aria-hidden="true">
+                  <svg class="ui-icon ui-icon--stroke" viewBox="0 0 24 24"><path d="M3 3l18 18"/><path d="M10.6 10.6a2 2 0 1 0 2.8 2.8"/><path d="M9.9 5.1A10 10 0 0 1 12 5c5 0 9.3 3.1 11 7-.5 1.2-1.2 2.3-2.1 3.2M6.1 6.1C4.6 7.3 3.4 8.9 2.5 12c1.7 3.9 6 7 11.5 7 1.4 0 2.7-.2 3.9-.6"/></svg>
+                </span>
+              </button>
+            </div>
             <button
               type="button"
               id="railAddBtn"
@@ -157,6 +209,20 @@
 
           <div class="workspace-rail-footer">
             <div class="workspace-rail-divider" aria-hidden="true"></div>
+            <button
+              type="button"
+              class="workspace-rail-btn workspace-rail-btn--all-rooms"
+              data-space="home"
+              title="All rooms"
+              aria-label="All rooms"
+            >
+              <span class="workspace-rail-orb workspace-rail-orb--tool" aria-hidden="true">
+                <svg class="ui-icon ui-icon--stroke" viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                  <path d="M4 10.5 12 4l8 6.5"/>
+                  <path d="M6.5 9.5V19a1 1 0 0 0 1 1H10v-5h4v5h2.5a1 1 0 0 0 1-1V9.5"/>
+                </svg>
+              </span>
+            </button>
             <div class="workspace-rail-stack workspace-rail-stack--tools" aria-label="Search and account">
               <button
                 type="button"
@@ -199,16 +265,31 @@
               >
                 <span class="workspace-rail-orb workspace-rail-orb--hidden" aria-hidden="true">H</span>
               </button>
-              <button
-                type="button"
-                id="railAccountBtn"
-                class="workspace-rail-btn workspace-rail-btn--account"
-                title="Settings"
-                aria-label="Settings"
-                hidden
-              >
-                <span id="railAccountOrb" class="workspace-rail-orb workspace-rail-orb--account" aria-hidden="true">?</span>
-              </button>
+              <div class="workspace-rail-account-stack" id="railAccountStack" hidden>
+                <div class="workspace-rail-account-btn-wrap">
+                  <button
+                    type="button"
+                    id="railAccountBtn"
+                    class="workspace-rail-btn workspace-rail-btn--account"
+                    title="Settings"
+                    aria-label="Settings"
+                  >
+                    <span id="railAccountOrb" class="workspace-rail-orb workspace-rail-orb--account" aria-hidden="true">?</span>
+                  </button>
+                  <button
+                    type="button"
+                    id="railPresenceBtn"
+                    class="rail-presence-btn-trigger is-online"
+                    title="Online"
+                    aria-label="Set presence: Online"
+                    aria-haspopup="menu"
+                    aria-expanded="false"
+                    aria-controls="railPresenceMenu"
+                  >
+                    <span id="railPresenceDot" class="rail-presence-dot is-online" aria-hidden="true"></span>
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </nav>
@@ -263,6 +344,45 @@
             <span>Log out</span>
             <span class="space-menu-icon" aria-hidden="true">
               <svg class="ui-icon ui-icon--stroke" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></svg>
+            </span>
+          </button>
+        </div>
+
+        <div id="railPresenceMenu" class="space-menu rail-presence-menu" hidden role="menu" aria-label="Set presence">
+          <button
+            type="button"
+            class="space-menu-item rail-presence-menu-item is-active"
+            data-presence="online"
+            role="menuitem"
+            aria-pressed="true"
+          >
+            <span class="rail-presence-menu-label">
+              <span class="rail-presence-dot is-online" aria-hidden="true"></span>
+              Online
+            </span>
+          </button>
+          <button
+            type="button"
+            class="space-menu-item rail-presence-menu-item"
+            data-presence="unavailable"
+            role="menuitem"
+            aria-pressed="false"
+          >
+            <span class="rail-presence-menu-label">
+              <span class="rail-presence-dot is-unavailable" aria-hidden="true"></span>
+              Idle
+            </span>
+          </button>
+          <button
+            type="button"
+            class="space-menu-item rail-presence-menu-item"
+            data-presence="offline"
+            role="menuitem"
+            aria-pressed="false"
+          >
+            <span class="rail-presence-menu-label">
+              <span class="rail-presence-dot is-offline" aria-hidden="true"></span>
+              Offline
             </span>
           </button>
         </div>
@@ -441,10 +561,7 @@
 
             <label class="create-room-field">
               <span>Name</span>
-              <span class="create-room-name-wrap">
-                <span id="createChildNamePrefix" class="create-room-name-prefix" aria-hidden="true">#</span>
-                <input id="createChildName" type="text" placeholder="general" autocomplete="off" required />
-              </span>
+              <input id="createChildName" type="text" placeholder="general" autocomplete="off" required />
             </label>
             <label class="create-room-field">
               <span>Topic <span class="settings-muted">(Optional)</span></span>
@@ -466,7 +583,7 @@
                   <span aria-hidden="true">▾</span>
                 </button>
               </div>
-              <div class="create-room-options">
+              <div id="createChildAdvanceOptions" class="create-room-options create-room-advance" hidden>
                 <label id="createChildEncryptionRow" class="create-room-option">
                   <span class="create-room-option-copy">
                     <strong>End-to-End Encryption</strong>
@@ -483,16 +600,14 @@
                   <input id="createChildForum" type="checkbox" class="create-room-switch-input" />
                   <span class="create-room-switch" aria-hidden="true"></span>
                 </label>
-                <div id="createChildAdvanceOptions" class="create-room-advance" hidden>
-                  <label id="createChildKnockRow" class="create-room-option">
-                    <span class="create-room-option-copy">
-                      <strong>Knock to Join</strong>
-                      <small>Anyone can request to join this room.</small>
-                    </span>
-                    <input id="createChildKnock" type="checkbox" class="create-room-switch-input" />
-                    <span class="create-room-switch" aria-hidden="true"></span>
-                  </label>
-                </div>
+                <label id="createChildKnockRow" class="create-room-option">
+                  <span class="create-room-option-copy">
+                    <strong>Knock to Join</strong>
+                    <small>Anyone can request to join this room.</small>
+                  </span>
+                  <input id="createChildKnock" type="checkbox" class="create-room-switch-input" />
+                  <span class="create-room-switch" aria-hidden="true"></span>
+                </label>
                 <label class="create-room-option">
                   <span class="create-room-option-copy">
                     <strong>Allow Federation</strong>
@@ -506,6 +621,17 @@
 
             <p id="createChildError" class="space-dialog-error" hidden></p>
             <button type="submit" id="createChildSubmit" class="create-room-submit">Create</button>
+          </form>
+        </dialog>
+
+        <dialog id="appConfirmDialog" class="space-dialog">
+          <form id="appConfirmForm" class="space-dialog-card app-confirm-card">
+            <h3 id="appConfirmTitle">Confirm</h3>
+            <p id="appConfirmMessage" class="space-dialog-topic"></p>
+            <div class="space-dialog-actions">
+              <button type="button" value="cancel" id="appConfirmCancel" class="ghost">Cancel</button>
+              <button type="submit" value="confirm" id="appConfirmOk">Delete</button>
+            </div>
           </form>
         </dialog>
 
@@ -591,6 +717,43 @@
           </button>
         </div>
 
+        <div id="roomsPanelContextMenu" class="space-menu" hidden role="menu">
+          <button type="button" class="space-menu-item" data-rooms-panel-action="create-channel" role="menuitem">
+            <span>Create Channel</span>
+            <span class="space-menu-icon" aria-hidden="true">
+              <svg class="ui-icon ui-icon--stroke" viewBox="0 0 24 24"><path d="M4 9h16M4 15h16M10 4l-2 16M16 4l-2 16"/></svg>
+            </span>
+          </button>
+          <button type="button" class="space-menu-item" data-rooms-panel-action="create-category" role="menuitem">
+            <span>Create Category</span>
+            <span class="space-menu-icon" aria-hidden="true">
+              <svg class="ui-icon ui-icon--stroke" viewBox="0 0 24 24"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6H9l2 2h8.5A1.5 1.5 0 0 1 21 9.5v7A1.5 1.5 0 0 1 19.5 18h-15A1.5 1.5 0 0 1 3 16.5v-9z"/><path d="M12 11v5M9.5 13.5h5"/></svg>
+            </span>
+          </button>
+        </div>
+
+        <div id="roomCategoryContextMenu" class="space-menu" hidden role="menu">
+          <button type="button" class="space-menu-item" data-room-category-action="create-channel" role="menuitem">
+            <span>Create Channel</span>
+            <span class="space-menu-icon" aria-hidden="true">
+              <svg class="ui-icon ui-icon--stroke" viewBox="0 0 24 24"><path d="M4 9h16M4 15h16M10 4l-2 16M16 4l-2 16"/></svg>
+            </span>
+          </button>
+          <button type="button" class="space-menu-item" data-room-category-action="create-category" role="menuitem">
+            <span>Create Category</span>
+            <span class="space-menu-icon" aria-hidden="true">
+              <svg class="ui-icon ui-icon--stroke" viewBox="0 0 24 24"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6H9l2 2h8.5A1.5 1.5 0 0 1 21 9.5v7A1.5 1.5 0 0 1 19.5 18h-15A1.5 1.5 0 0 1 3 16.5v-9z"/><path d="M12 11v5M9.5 13.5h5"/></svg>
+            </span>
+          </button>
+          <div class="space-menu-sep"></div>
+          <button type="button" class="space-menu-item space-menu-item--danger" data-room-category-action="delete" role="menuitem">
+            <span>Delete Category</span>
+            <span class="space-menu-icon" aria-hidden="true">
+              <svg class="ui-icon ui-icon--stroke" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M10 11v6M14 11v6"/></svg>
+            </span>
+          </button>
+        </div>
+
         <dialog id="spaceSettingsDialog" class="space-dialog">
           <form method="dialog" id="spaceSettingsForm" class="space-dialog-card">
             <h3 id="spaceSettingsTitle">Space Settings</h3>
@@ -669,7 +832,7 @@
           <button type="button" class="space-menu-item" data-message-action="pin" role="menuitem">
             <span id="messagePinLabel">Pin Message</span>
             <span class="space-menu-icon" aria-hidden="true">
-              <svg class="ui-icon ui-icon--stroke" viewBox="0 0 24 24"><path d="M12 17v5"/><path d="M9 3h6l1 7H8L9 3z"/><path d="M8 10h8l-1.5 4h-5L8 10z"/></svg>
+              <svg class="ui-icon ui-icon--stroke" viewBox="0 0 24 24"><path d="M12 17v5"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/></svg>
             </span>
           </button>
           <div class="space-menu-sep" data-message-sep="delete"></div>
@@ -777,7 +940,7 @@
           </button>
           <div class="space-menu-sep"></div>
           <button type="button" class="space-menu-item space-menu-item--danger" data-room-action="leave" role="menuitem">
-            <span>Leave Room</span>
+            <span>Leave Channel</span>
             <span class="space-menu-icon" aria-hidden="true">
               <svg class="ui-icon ui-icon--stroke" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></svg>
             </span>
@@ -786,8 +949,27 @@
 
         <dialog id="roomSettingsDialog" class="space-dialog">
           <form id="roomSettingsForm" class="space-dialog-card">
-            <h3 id="roomSettingsTitle">Room Settings</h3>
+            <h3 id="roomSettingsTitle">Profile</h3>
             <p id="roomSettingsMeta" class="space-dialog-topic"></p>
+            <div class="room-settings-avatar-row">
+              <div class="room-settings-avatar-copy">
+                <span class="room-settings-avatar-label">Avatar</span>
+                <div class="room-settings-avatar-actions">
+                  <button type="button" id="roomSettingsAvatarUpload" class="ghost">Upload</button>
+                  <button type="button" id="roomSettingsAvatarRemove" class="ghost danger-text">Remove</button>
+                  <input
+                    id="roomSettingsAvatarFile"
+                    type="file"
+                    accept="image/*,.png,.apng,.gif,.jpg,.jpeg,.webp,.bmp,.avif"
+                    hidden
+                  />
+                </div>
+              </div>
+              <div class="room-settings-avatar-preview" aria-hidden="true">
+                <img id="roomSettingsAvatar" class="room-settings-avatar" alt="" hidden />
+                <span id="roomSettingsAvatarFallback" class="room-settings-avatar-fallback">?</span>
+              </div>
+            </div>
             <label>
               Name
               <input id="roomSettingsName" type="text" autocomplete="off" />
@@ -815,8 +997,8 @@
             </label>
             <p id="roomSettingsError" class="space-dialog-error" hidden></p>
             <div class="space-dialog-actions">
-              <button type="button" id="roomSettingsCancel" class="ghost" value="cancel">Close</button>
               <button type="submit" id="roomSettingsSave">Save</button>
+              <button type="button" id="roomSettingsCancel" class="ghost" value="cancel">Cancel</button>
             </div>
           </form>
         </dialog>
@@ -865,7 +1047,7 @@
             <p id="inviteUserMeta" class="space-dialog-topic">Send a Matrix invite to this room or space.</p>
             <label>
               Matrix user ID
-              <input id="inviteUserInput" type="text" placeholder="@user:exau.dev" autocomplete="off" required />
+              <input id="inviteUserInput" type="text" placeholder="@user:matrix.org" autocomplete="off" required />
             </label>
             <p id="inviteUserError" class="space-dialog-error" hidden></p>
             <div class="space-dialog-actions">
@@ -1035,7 +1217,10 @@
                   <path d="m15 18-6-6 6-6"/>
                 </svg>
               </button>
-              <h1 id="spaceFilterLabel" class="rail-head-title">Direct Messages</h1>
+              <div class="rail-head-main">
+                <h1 id="spaceFilterLabel" class="rail-head-title">Direct Messages</h1>
+                <div class="window-drag-strip rail-head-drag" aria-hidden="true"></div>
+              </div>
               <div class="rail-head-actions" id="railHeadDmActions" hidden>
                 <button type="button" id="dmCreateChatHeadBtn" class="rail-head-btn" title="Create chat" aria-label="Create chat">
                   <svg class="ui-icon ui-icon--stroke" viewBox="0 0 24 24" aria-hidden="true">
@@ -1117,6 +1302,7 @@
             <ul id="roomList" class="room-list"></ul>
           </aside>
           <div id="chatStage" class="chat-stage">
+          <div id="composerDropHint" class="composer-drop-hint" hidden>Drop files to upload</div>
           <section id="createChatPane" class="create-chat-pane" hidden>
             <div class="create-chat-card">
               <div class="create-chat-hero" aria-hidden="true">@</div>
@@ -1145,6 +1331,66 @@
           <section id="lobbyPane" class="lobby-pane" hidden>
             <div id="lobbyBody" class="lobby-body"></div>
           </section>
+          <section id="explorePane" class="explore-pane" hidden>
+            <aside class="explore-nav" aria-label="Explore servers">
+              <h2 class="explore-nav-title">Explore Community</h2>
+              <button type="button" class="explore-nav-item is-active" data-explore-server="featured" id="exploreFeaturedBtn">
+                <span class="explore-nav-icon" aria-hidden="true">
+                  <svg class="ui-icon ui-icon--stroke" viewBox="0 0 24 24"><path d="M9 18h6M10 22h4M12 2a7 7 0 0 1 4 12.5V17H8v-2.5A7 7 0 0 1 12 2z"/></svg>
+                </span>
+                <span>Featured</span>
+              </button>
+              <div id="exploreServerList" class="explore-server-list"></div>
+              <button type="button" id="exploreAddServerBtn" class="explore-add-server">+ Add Server</button>
+            </aside>
+            <div class="explore-main">
+              <header class="explore-main-head">
+                <div>
+                  <p class="explore-kicker">Search</p>
+                  <h3 id="exploreServerTitle">Featured</h3>
+                </div>
+              </header>
+              <form id="exploreSearchForm" class="explore-search-form">
+                <input id="exploreSearchInput" type="search" placeholder="Search for keyword" autocomplete="off" />
+                <button type="submit" id="exploreSearchSubmit">Enter</button>
+              </form>
+              <div class="explore-filters">
+                <div class="explore-filter-pills" role="group" aria-label="Filter">
+                  <button type="button" class="explore-filter-pill is-active" data-explore-filter="all">All</button>
+                  <button type="button" class="explore-filter-pill" data-explore-filter="spaces">Spaces</button>
+                  <button type="button" class="explore-filter-pill" data-explore-filter="rooms">Rooms</button>
+                </div>
+                <label class="explore-limit">
+                  Page Limit
+                  <select id="exploreLimitSelect">
+                    <option value="24" selected>24</option>
+                    <option value="48">48</option>
+                    <option value="96">96</option>
+                  </select>
+                </label>
+              </div>
+              <div id="exploreResults" class="explore-results"></div>
+              <div class="explore-more-wrap">
+                <button type="button" id="exploreLoadMoreBtn" class="explore-load-more" hidden>Load more</button>
+              </div>
+              <p id="exploreStatus" class="explore-status" hidden></p>
+            </div>
+          </section>
+          <dialog id="exploreAddServerDialog" class="space-dialog">
+            <form id="exploreAddServerForm" class="space-dialog-card">
+              <h3>Add Server</h3>
+              <p class="space-dialog-topic">Add a homeserver name to explore its public communities.</p>
+              <label>
+                Server name
+                <input id="exploreAddServerInput" type="text" placeholder="matrix.org" autocomplete="off" required />
+              </label>
+              <p id="exploreAddServerError" class="space-dialog-error" hidden></p>
+              <div class="space-dialog-actions">
+                <button type="button" id="exploreAddServerCancel" class="ghost">Cancel</button>
+                <button type="submit">Explore</button>
+              </div>
+            </form>
+          </dialog>
           <section id="forumPane" class="forum-pane" hidden>
             <div id="forumBody" class="forum-body"></div>
           </section>
@@ -1197,6 +1443,7 @@
                     <p id="callStatus" class="call-status" hidden></p>
                   </div>
                 </div>
+                <div class="window-drag-strip timeline-head-drag" aria-hidden="true"></div>
               </div>
               <div class="timeline-head-actions" id="timelineCallActions" hidden>
                 <div class="timeline-action-group">
@@ -1226,16 +1473,10 @@
                 </button>
                 <button type="button" id="roomPinsBtn" class="timeline-icon-btn" title="Pinned messages" aria-label="Pinned messages" aria-haspopup="dialog" aria-expanded="false">
                   <svg class="ui-icon ui-icon--stroke" viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M15 4.5 9.5 5.8 8 11l5 5 5.2-1.5L19.5 9z"/>
-                    <path d="m12 15.5-4.5 6"/>
+                    <path d="M12 17v5"/>
+                    <path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/>
                   </svg>
                   <span id="roomPinsBadge" class="timeline-icon-badge" hidden>0</span>
-                </button>
-                <button type="button" id="roomMembersBtn" class="timeline-icon-btn" title="Show members" aria-label="Show members" aria-pressed="false">
-                  <svg class="ui-icon ui-icon--stroke" viewBox="0 0 24 24" aria-hidden="true">
-                    <circle cx="12" cy="8" r="3.5"/>
-                    <path d="M5 19.5c.8-3.2 3.4-5 7-5s6.2 1.8 7 5"/>
-                  </svg>
                 </button>
                 <button type="button" id="roomThreadsBtn" class="timeline-icon-btn" title="Threads" aria-label="Threads" aria-haspopup="dialog" aria-expanded="false">
                   <svg class="ui-icon ui-icon--stroke" viewBox="0 0 24 24" aria-hidden="true">
@@ -1248,6 +1489,12 @@
                     <rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/>
                     <circle cx="9" cy="10" r="1.6"/>
                     <path d="m7.5 17 3.2-3.4a1.2 1.2 0 0 1 1.7 0L14 15.2l1.3-1.3a1.2 1.2 0 0 1 1.7 0L19 16.5"/>
+                  </svg>
+                </button>
+                <button type="button" id="roomMembersBtn" class="timeline-icon-btn" title="Show members" aria-label="Show members" aria-pressed="false">
+                  <svg class="ui-icon ui-icon--stroke" viewBox="0 0 24 24" aria-hidden="true">
+                    <circle cx="12" cy="8" r="3.5"/>
+                    <path d="M5 19.5c.8-3.2 3.4-5 7-5s6.2 1.8 7 5"/>
                   </svg>
                 </button>
                 <button type="button" id="roomMoreBtn" class="timeline-icon-btn" title="More options" aria-label="More options" aria-haspopup="menu" aria-expanded="false">
@@ -1270,9 +1517,11 @@
                 <span>Jump to Latest</span>
               </button>
             </div>
-            <div id="typingIndicator" class="typing-indicator" hidden aria-live="polite"></div>
+            <div class="chat-status-row">
+              <div id="typingIndicator" class="typing-indicator" hidden aria-live="polite"></div>
+              <div id="roomReadReceipts" class="room-read-receipts" hidden aria-live="polite"></div>
+            </div>
             <form id="composerForm" class="composer" hidden>
-              <div id="composerDropHint" class="composer-drop-hint" hidden>Drop images to upload</div>
               <div id="composerReplyBar" class="composer-reply-bar" hidden>
                 <div class="composer-reply-copy">
                   <strong id="composerReplyLabel">Replying</strong>
@@ -1376,7 +1625,6 @@
               <input
                 id="composerFile"
                 type="file"
-                accept="image/*,video/*,.png,.apng,.gif,.jpg,.jpeg,.webp,.bmp,.avif,.heic,.heif,.webm,.mp4,.mov"
                 multiple
                 hidden
               />
@@ -1547,6 +1795,11 @@
                     Auto-join space rooms
                   </label>
                   <p class="settings-muted">Automatically join accessible rooms when joining a space.</p>
+                  <label class="settings-check">
+                    <input id="prefShowExploreCommunity" type="checkbox" checked />
+                    Show Explore Community
+                  </label>
+                  <p class="settings-muted">Show the Explore Community button on the space rail. You can also hide it from the button’s right-click menu.</p>
                 </section>
                 <section class="settings-block">
                   <h3>Messages</h3>
@@ -1579,7 +1832,7 @@
                     Legacy username color
                   </label>
                   <label class="settings-check">
-                    <input id="prefHideMembership" type="checkbox" />
+                    <input id="prefHideMembership" type="checkbox" checked />
                     Hide membership change
                   </label>
                   <label class="settings-check">
@@ -1666,13 +1919,13 @@
               <div id="pane-settings-devices" class="settings-pane" data-settings-pane="devices" hidden>
                 <header class="settings-pane-title"><h3>Devices</h3></header>
 
-                <section class="settings-block">
+                <section class="settings-block devices-security-block">
                   <h3>Security</h3>
                   <div class="device-security-card">
                     <div class="device-security-row">
-                      <div>
+                      <div class="device-security-copy">
                         <p class="settings-row-title">Device Verification</p>
-                        <p class="settings-muted">To verify device identity and grant access to encrypted messages.</p>
+                        <p class="settings-muted">Verify this session to unlock encrypted history and trust other devices.</p>
                       </div>
                       <div class="device-security-actions">
                         <button type="button" id="deviceVerificationBtn" class="device-verify-btn">Unavailable</button>
@@ -1693,13 +1946,8 @@
                         </div>
                       </div>
                     </div>
-                    <p id="deviceSecurityNote" class="settings-muted"></p>
+                    <p id="deviceSecurityNote" class="device-security-note" hidden></p>
                   </div>
-                </section>
-
-                <section class="settings-block">
-                  <h3>Current</h3>
-                  <div id="devicesCurrentList" class="devices-list"></div>
                   <div id="deviceBackupRow" class="device-backup-row" hidden>
                     <div class="device-backup-copy">
                       <span class="settings-row-title">Encryption Backup</span>
@@ -1713,8 +1961,13 @@
                 </section>
 
                 <section class="settings-block">
+                  <h3>This device</h3>
+                  <div id="devicesCurrentList" class="devices-list"></div>
+                </section>
+
+                <section class="settings-block">
                   <div class="devices-others-head">
-                    <h3>Others</h3>
+                    <h3>Other devices</h3>
                     <button type="button" id="removeUnverifiedDevicesBtn" class="ghost danger-text" hidden>
                       Remove unverified
                     </button>
@@ -2423,6 +2676,6 @@
       })();
     </script>
     <!-- /kitsu-standalone-boot -->
-    <script defer src="/app.js"></script>
+    <script defer src="/app.js?v=0.3.16"></script>
   </body>
 </html>

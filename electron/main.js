@@ -317,6 +317,7 @@ function createWindow() {
     minHeight: 640,
     title: 'Kitsu',
     backgroundColor: '#313338',
+    frame: false,
     autoHideMenuBar: true,
     icon: iconPath,
     webPreferences: {
@@ -358,6 +359,13 @@ function createWindow() {
       .catch((error) => console.warn('[ui-state] failed', error?.message || error));
   });
 
+  const sendMaximized = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.webContents.send('relay:window-maximized', mainWindow.isMaximized());
+  };
+  mainWindow.on('maximize', sendMaximized);
+  mainWindow.on('unmaximize', sendMaximized);
+
   mainWindow.on('focus', () => {
     if (mainWindow) mainWindow.flashFrame(false);
   });
@@ -368,12 +376,33 @@ function createWindow() {
 }
 
 function focusMainWindow() {
-  if (!mainWindow) return;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
+  // Brief always-on-top nudge raises the window on Wayland without blur() (blur
+  // steals focus to whatever is behind — e.g. Cursor — and leaves Kitsu stuck back there).
+  if (process.platform === 'linux') {
+    try {
+      mainWindow.setAlwaysOnTop(true, 'screen-saver');
+      mainWindow.setAlwaysOnTop(false);
+    } catch {
+      // ignore
+    }
+  }
   mainWindow.focus();
+  try {
+    mainWindow.webContents?.focus?.();
+  } catch {
+    // ignore
+  }
   mainWindow.flashFrame(false);
 }
+
+ipcMain.handle('relay:focus-window', () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return { ok: false };
+  focusMainWindow();
+  return { ok: true };
+});
 
 ipcMain.handle('relay:app-info', () => ({
   name: 'Kitsu',
@@ -408,6 +437,11 @@ ipcMain.handle('relay:protocol-repair', () => registerProtocolHandler());
 ipcMain.handle('relay:window-focused', (event) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   return Boolean(win && win.isFocused());
+});
+
+ipcMain.handle('relay:window-is-maximized', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  return Boolean(win && win.isMaximized());
 });
 
 ipcMain.handle('relay:window-action', (event, action) => {

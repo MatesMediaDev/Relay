@@ -72,6 +72,9 @@ class MatrixSession {
     this.profileStyleCache = new Map();
     /** @type {Map<string, { meta: object, ts: number, avatarKey: string }>} */
     this.avatarMetaCache = new Map();
+    /** @type {Promise<object> | null} */
+    this._presenceSetPromise = null;
+    this._presenceSetAt = 0;
   }
 
   ensureDataDir() {
@@ -187,6 +190,7 @@ class MatrixSession {
       deviceId: this.client.getDeviceId(),
       avatarUrl: this.getLocalProfileAvatarPath(userId, 96),
       hasAvatar: Boolean(this.getProfileAvatarRemoteUrl(userId, 96)),
+      ...this.getSelfPresence(),
       error: this.lastError,
     };
   }
@@ -760,11 +764,94 @@ class MatrixSession {
   async setCustomStatus(statusMsg) {
     if (!this.client) throw new Error('Not logged in');
     const message = String(statusMsg || '').trim();
-    await this.client.setPresence({
-      presence: 'online',
-      status_msg: message || undefined,
-    });
-    return { ok: true, statusMsg: message };
+    const self = this.getSelfPresence();
+    return this.setPresenceState(self.presence || 'online', { statusMsg: message });
+  }
+
+  presenceRequestError(error) {
+    const status = error?.httpStatus ?? error?.status;
+    const errcode = String(error?.errcode || '');
+    const message = String(error?.message || error || '');
+    if (
+      status === 429 ||
+      errcode === 'M_LIMIT_EXCEEDED' ||
+      /\b429\b|too many requests|rate.?limit/i.test(message)
+    ) {
+      return new Error('Presence updates are rate-limited. Wait a moment and try again.');
+    }
+    return error instanceof Error ? error : new Error(message || 'Presence update failed');
+  }
+
+  getSelfPresence() {
+    if (!this.client) return { presence: 'offline', statusMsg: '' };
+    const userId = this.client.getUserId();
+    const user = this.client.getUser?.(userId);
+    const presence = this.getUserPresence(userId) || 'offline';
+    return {
+      presence,
+      statusMsg: user?.presenceStatusMsg || '',
+      online: presence === 'online',
+    };
+  }
+
+  async setPresenceState(presence, { statusMsg = undefined } = {}) {
+    if (!this.client) throw new Error('Not logged in');
+    const allowed = new Set(['online', 'unavailable', 'offline']);
+    const next = allowed.has(presence) ? presence : 'online';
+    const userId = this.client.getUserId();
+    const user = this.client.getUser?.(userId);
+    const message =
+      statusMsg !== undefined ? String(statusMsg || '').trim() : user?.presenceStatusMsg || '';
+    const current = this.getSelfPresence();
+    if (current.presence === next && current.statusMsg === message) {
+      return {
+        ok: true,
+        presence: next,
+        statusMsg: message,
+        online: next === 'online',
+        unchanged: true,
+      };
+    }
+
+    if (this._presenceSetPromise) {
+      try {
+        await this._presenceSetPromise;
+      } catch {
+        // latest request still runs below
+      }
+      const after = this.getSelfPresence();
+      if (after.presence === next && after.statusMsg === message) {
+        return {
+          ok: true,
+          presence: next,
+          statusMsg: message,
+          online: next === 'online',
+          unchanged: true,
+        };
+      }
+    }
+
+    this._presenceSetPromise = (async () => {
+      try {
+        await this.client.setPresence({
+          presence: next,
+          status_msg: message || undefined,
+        });
+        this._presenceSetAt = Date.now();
+        return {
+          ok: true,
+          presence: next,
+          statusMsg: message,
+          online: next === 'online',
+        };
+      } catch (error) {
+        throw this.presenceRequestError(error);
+      } finally {
+        this._presenceSetPromise = null;
+      }
+    })();
+
+    return this._presenceSetPromise;
   }
 
   notificationModeFromRule(rule) {
@@ -1130,7 +1217,7 @@ class MatrixSession {
 
   /**
    * Resolve a user-entered server name / URL to a Matrix client API base URL.
-   * Supports bare domains via .well-known (e.g. exau.dev → matrix-origin.exau.dev).
+   * Supports bare domains via .well-known (e.g. example.com → matrix.example.com).
    */
   async resolveHomeserverBaseUrl(input, sdk) {
     const raw = String(input || '').trim();
@@ -1301,6 +1388,19 @@ class MatrixSession {
         });
       });
     }
+
+    if (sdk.RoomMemberEvent?.Typing) {
+      client.on(sdk.RoomMemberEvent.Typing, (_event, member) => {
+        if (!this.ready || !member?.roomId) return;
+        this.publishLive({
+          kind: 'typing',
+          roomId: member.roomId,
+          userId: member.userId || null,
+          typing: Boolean(member.typing),
+          live: true,
+        });
+      });
+    }
   }
 
   publishLive(payload) {
@@ -1403,7 +1503,7 @@ class MatrixSession {
       eventId: event.getId(),
       sender,
       senderName: this.getMemberDisplayName(room, sender),
-      senderAvatarUrl: this.getLocalProfileAvatarPath(sender, 48),
+      senderAvatarUrl: this.getLocalProfileAvatarPath(sender, 96),
       body: displayBody,
       msgtype,
       ts: event.getTs(),
@@ -1489,7 +1589,7 @@ class MatrixSession {
       byUser.set(userId, {
         userId,
         displayName: this.getMemberDisplayName(room, userId),
-        avatarUrl: this.getLocalProfileAvatarPath(userId, 48),
+        avatarUrl: this.getLocalProfileAvatarPath(userId, 96),
         hasAvatar: Boolean(avatarMxc),
       });
     }
@@ -1634,7 +1734,7 @@ class MatrixSession {
       const message = error?.message || String(error);
       if (/Unexpected token|<!DOCTYPE|is not valid JSON/i.test(message)) {
         throw new Error(
-          `Homeserver at ${baseUrl} did not return a Matrix API response. Try your server name (e.g. exau.dev) or the client API URL.`,
+          `Homeserver at ${baseUrl} did not return a Matrix API response. Try your server name (e.g. matrix.org) or the client API URL.`,
         );
       }
       throw error;
@@ -1983,22 +2083,25 @@ class MatrixSession {
     return ids;
   }
 
+  getRoomAvatarMxc(room) {
+    if (!room) return null;
+    try {
+      if (typeof room.getMxcAvatarUrl === 'function') {
+        const mxc = room.getMxcAvatarUrl();
+        if (mxc) return mxc;
+      }
+      const event = room.currentState?.getStateEvents?.('m.room.avatar', '');
+      const url = event?.getContent?.()?.url;
+      return typeof url === 'string' && url.startsWith('mxc://') ? url : null;
+    } catch {
+      return null;
+    }
+  }
+
   getRoomAvatarUrl(room, size = 64, { original = false } = {}) {
     if (!this.client || !room) return null;
 
-    const mxcFromRoom = () => {
-      try {
-        if (typeof room.getMxcAvatarUrl === 'function') {
-          const mxc = room.getMxcAvatarUrl();
-          if (mxc) return mxc;
-        }
-        const event = room.currentState?.getStateEvents?.('m.room.avatar', '');
-        const url = event?.getContent?.()?.url;
-        return typeof url === 'string' ? url : null;
-      } catch {
-        return null;
-      }
-    };
+    const mxcFromRoom = () => this.getRoomAvatarMxc(room);
 
     try {
       if (original) {
@@ -2017,6 +2120,11 @@ class MatrixSession {
           room.getAvatarUrl(this.client.getHomeserverUrl(), size, size, 'crop', false, true) ||
           null;
         if (roomAvatar) return roomAvatar;
+      }
+      // Some SDK/room shapes leave getAvatarUrl empty even when m.room.avatar is set.
+      const mxc = mxcFromRoom();
+      if (mxc) {
+        return this.mxcToHttpAvatar(mxc, size) || mxc;
       }
     } catch {
       // fall through to DM/member fallback
@@ -2171,9 +2279,58 @@ class MatrixSession {
     return new Set(this.getSpaceChildEntries(spaceRoom).map((entry) => entry.roomId));
   }
 
+  /**
+   * Room ids listed under any joined space (recursive m.space.child), excluding space rooms themselves.
+   */
+  getSpaceOrganizedRoomIds() {
+    const ids = new Set();
+    if (!this.client) return ids;
+
+    const walk = (spaceRoom, depth = 0) => {
+      if (!spaceRoom || depth > 8) return;
+      for (const entry of this.getSpaceChildEntries(spaceRoom)) {
+        const child = this.client.getRoom(entry.roomId);
+        if (!child) continue;
+        if (this.isSpaceLikeRoom(child)) {
+          walk(child, depth + 1);
+        } else {
+          ids.add(entry.roomId);
+        }
+      }
+    };
+
+    for (const room of this.client.getRooms() || []) {
+      if (!this.isSpaceLikeRoom(room) || !this.isJoinedRoom(room)) continue;
+      walk(room);
+    }
+    return ids;
+  }
+
+  isRoomInJoinedSpaceHierarchy(room, organizedIds = null) {
+    if (!this.client || !room) return false;
+    for (const parentId of this.getJoinedParentSpaceIds(room)) {
+      const parent = this.client.getRoom(parentId);
+      if (parent && this.isSpaceLikeRoom(parent) && this.isJoinedRoom(parent)) {
+        return true;
+      }
+    }
+    const ids = organizedIds || this.getSpaceOrganizedRoomIds();
+    return ids.has(room.roomId);
+  }
+
   getDmPeerUserId(room) {
     if (!this.client || !room) return null;
     const myId = this.client.getUserId();
+    try {
+      const direct = this.client.getAccountData?.('m.direct')?.getContent?.() || {};
+      for (const [userId, rooms] of Object.entries(direct)) {
+        if (userId && userId !== myId && Array.isArray(rooms) && rooms.includes(room.roomId)) {
+          return userId;
+        }
+      }
+    } catch {
+      // fall through
+    }
     try {
       const members =
         typeof room.getJoinedMembers === 'function'
@@ -2183,14 +2340,6 @@ class MatrixSession {
         .map((member) => member?.userId || member?.user_id)
         .filter((id) => id && id !== myId);
       if (others.length === 1) return others[0];
-    } catch {
-      // fall through
-    }
-    try {
-      const direct = this.client.getAccountData?.('m.direct')?.getContent?.() || {};
-      for (const [userId, rooms] of Object.entries(direct)) {
-        if (Array.isArray(rooms) && rooms.includes(room.roomId)) return userId;
-      }
     } catch {
       // ignore
     }
@@ -2261,6 +2410,71 @@ class MatrixSession {
     }
   }
 
+  getDmSidebarStatus(room) {
+    const typingUsers = this.getTypingUsers(room.roomId);
+    const typing = typingUsers.length > 0;
+    const typingLabel = typing
+      ? typingUsers.length === 1
+        ? 'Typing…'
+        : `${typingUsers.length} typing…`
+      : '';
+    let lastMine = false;
+    let peerRead = false;
+    if (!this.client) {
+      return { typing, typingLabel, lastMine, peerRead };
+    }
+    const myId = this.client.getUserId();
+    const peerId = this.getDmPeerUserId(room);
+    const liveEvents =
+      typeof room.getLiveTimeline === 'function'
+        ? room.getLiveTimeline()?.getEvents?.() || []
+        : [];
+    let sawLastMessage = false;
+    let lastOutboundId = null;
+    for (let i = liveEvents.length - 1; i >= 0; i -= 1) {
+      const ev = liveEvents[i];
+      if (!ev) continue;
+      const type = ev.getType?.();
+      if (type !== 'm.room.message' && type !== 'm.room.encrypted') continue;
+      if (typeof ev.isRedacted === 'function' && ev.isRedacted()) continue;
+      const sender = ev.getSender?.();
+      if (!sawLastMessage) {
+        lastMine = sender === myId;
+        sawLastMessage = true;
+      }
+      if (sender === myId) {
+        lastOutboundId = ev.getId?.() || null;
+        break;
+      }
+    }
+    if (lastOutboundId && peerId) {
+      try {
+        if (typeof room.hasUserReadEvent === 'function') {
+          peerRead = Boolean(room.hasUserReadEvent(peerId, lastOutboundId));
+        } else {
+          const peerUpTo =
+            (typeof room.getEventReadUpTo === 'function' && room.getEventReadUpTo(peerId)) ||
+            null;
+          if (peerUpTo === lastOutboundId) {
+            peerRead = true;
+          } else if (peerUpTo) {
+            let peerIdx = -1;
+            let outIdx = -1;
+            for (let j = 0; j < liveEvents.length; j += 1) {
+              const id = liveEvents[j]?.getId?.();
+              if (id === peerUpTo) peerIdx = j;
+              if (id === lastOutboundId) outIdx = j;
+            }
+            peerRead = peerIdx >= 0 && outIdx >= 0 && peerIdx >= outIdx;
+          }
+        }
+      } catch {
+        peerRead = false;
+      }
+    }
+    return { typing, typingLabel, lastMine, peerRead };
+  }
+
   serializeRoom(room, { isDirect = false } = {}) {
     const last = room.getLastLiveEvent?.() || null;
     const dmUserId = isDirect ? this.getDmPeerUserId(room) : null;
@@ -2269,6 +2483,9 @@ class MatrixSession {
     const topicEvent = room.currentState?.getStateEvents?.('m.room.topic', '');
     const topic = topicEvent?.getContent?.()?.topic || '';
     const creator = this.getRoomCreatorInfo(room);
+    const dmStatus = isDirect
+      ? this.getDmSidebarStatus(room)
+      : { typing: false, typingLabel: '', lastMine: false, peerRead: false };
     return {
       roomId: room.roomId,
       name: room.name || room.roomId,
@@ -2287,13 +2504,17 @@ class MatrixSession {
       dmUserId,
       presence,
       online: presence === 'online',
+      typing: dmStatus.typing,
+      typingLabel: dmStatus.typingLabel,
+      lastMine: dmStatus.lastMine,
+      peerRead: dmStatus.peerRead,
       alias,
       permalink: alias
         ? `https://matrix.to/#/${alias}`
         : `https://matrix.to/#/${room.roomId}`,
       avatarUrl: this.getLocalAvatarPath(room.roomId, 96),
       avatarUrlLg: this.getLocalAvatarPath(room.roomId, 128, { original: true }),
-      hasAvatar: Boolean(this.getRoomAvatarUrl(room, 96)),
+      hasAvatar: Boolean(this.getRoomAvatarMxc(room) || this.getRoomAvatarUrl(room, 96)),
       memberCount:
         typeof room.getJoinedMemberCount === 'function'
           ? room.getJoinedMemberCount()
@@ -2425,7 +2646,8 @@ class MatrixSession {
       const last = events[events.length - 1];
       if (!last) continue;
       try {
-        await this.client.sendReadReceipt(last);
+        // Unthreaded public receipts so other clients (and the other DM party) see them.
+        await this.client.sendReadReceipt(last, undefined, true);
       } catch {
         // ignore per-room receipt failures
       }
@@ -2453,6 +2675,318 @@ class MatrixSession {
 
   async leaveSpace(spaceId) {
     return this.leaveRoom(spaceId);
+  }
+
+  /**
+   * Remove a child room/space link from a parent space (clears m.space.child).
+   * Matrix treats empty content as "unlisted" / removed from the hierarchy.
+   */
+  async removeSpaceChild(parentSpaceId, childId) {
+    if (!this.client) throw new Error('Not logged in');
+    const parentId = String(parentSpaceId || '').trim();
+    const childRoomId = String(childId || '').trim();
+    if (!parentId.startsWith('!') || !childRoomId.startsWith('!')) {
+      throw new Error('Parent space and child id are required');
+    }
+    const parent = this.client.getRoom(parentId);
+    if (!parent || !this.isSpaceLikeRoom(parent)) throw new Error('Parent space not found');
+    if (!this.isJoinedRoom(parent)) throw new Error('Join the parent space first');
+
+    await this.client.sendStateEvent(parentId, 'm.space.child', {}, childRoomId);
+    return { ok: true, parentSpaceId: parentId, childId: childRoomId };
+  }
+
+  getSpaceChildStateContent(parentSpaceId, childId) {
+    const parent = this.client?.getRoom?.(parentSpaceId);
+    if (!parent?.currentState?.getStateEvents) return null;
+    const event = parent.currentState.getStateEvents('m.space.child', childId);
+    const content = event?.getContent?.() || null;
+    if (!content || Object.keys(content).length === 0) return null;
+    return { ...content };
+  }
+
+  spaceChildOrderKey(index) {
+    return `a${String(Math.max(0, Number(index) || 0)).padStart(4, '0')}`;
+  }
+
+  /**
+   * Lexicographic m.space.child order strictly between two sibling keys (either may be null).
+   */
+  orderKeyBetween(before, after) {
+    const lo = typeof before === 'string' && before ? before : null;
+    const hi = typeof after === 'string' && after ? after : null;
+    if (!lo && !hi) return this.spaceChildOrderKey(0);
+    if (!lo) {
+      const tail = hi;
+      if (tail.length > 1) {
+        const candidate = `${tail.slice(0, -1)}${String.fromCharCode(Math.max(33, tail.charCodeAt(tail.length - 1) - 1))}`;
+        if (candidate < tail) return candidate;
+      }
+      return `\u0000${tail}`;
+    }
+    if (!hi) return `${lo}a`;
+    if (lo >= hi) return `${lo}a`;
+
+    let prefix = '';
+    const maxLen = Math.max(lo.length, hi.length);
+    for (let i = 0; i < maxLen; i += 1) {
+      const lc = i < lo.length ? lo.charCodeAt(i) : 96;
+      const hc = i < hi.length ? hi.charCodeAt(i) : 123;
+      if (lc === hc) {
+        prefix += lo[i] || hi[i];
+        continue;
+      }
+      if (hc - lc > 1) {
+        return prefix + String.fromCharCode(Math.floor((lc + hc) / 2));
+      }
+      prefix += lo[i];
+      return `${prefix}a`;
+    }
+    return `${lo}a`;
+  }
+
+  resolveSpaceChildVia(parentId, childId, existingVia) {
+    if (Array.isArray(existingVia) && existingVia.length) {
+      return existingVia.map((entry) => String(entry || '').trim()).filter(Boolean);
+    }
+    const via = [];
+    const myDomain = String(this.client?.getUserId?.() || '').split(':')[1];
+    if (myDomain) via.push(myDomain);
+    for (const id of [parentId, childId]) {
+      const domain = String(id || '').split(':')[1];
+      if (domain && !via.includes(domain)) via.push(domain);
+    }
+    return via.slice(0, 3);
+  }
+
+  /**
+   * Create/update an m.space.child link, optionally setting lexicographic `order`.
+   */
+  async setSpaceChild(parentSpaceId, childId, { order = undefined, suggested = undefined, via = undefined } = {}) {
+    if (!this.client) throw new Error('Not logged in');
+    const parentId = String(parentSpaceId || '').trim();
+    const childRoomId = String(childId || '').trim();
+    if (!parentId.startsWith('!') || !childRoomId.startsWith('!')) {
+      throw new Error('Parent space and child id are required');
+    }
+    const parent = this.client.getRoom(parentId);
+    if (!parent || !this.isSpaceLikeRoom(parent)) throw new Error('Parent space not found');
+    if (!this.isJoinedRoom(parent)) throw new Error('Join the parent space first');
+
+    const prev = this.getSpaceChildStateContent(parentId, childRoomId) || {};
+    const nextVia = this.resolveSpaceChildVia(parentId, childRoomId, via ?? prev.via);
+    const content = {
+      auto_join: Boolean(prev.auto_join),
+      suggested: suggested !== undefined ? Boolean(suggested) : Boolean(prev.suggested),
+      ...(nextVia.length ? { via: nextVia } : {}),
+    };
+    if (order !== undefined && order !== null) {
+      content.order = String(order);
+    } else if (typeof prev.order === 'string') {
+      content.order = prev.order;
+    }
+
+    await this.client.sendStateEvent(parentId, 'm.space.child', content, childRoomId);
+    return { ok: true, parentSpaceId: parentId, childId: childRoomId, content };
+  }
+
+  /**
+   * Rewrite m.space.child `order` for ids in orderedChildIds (only sends events that changed).
+   */
+  async reorderSpaceChildren(parentSpaceId, orderedChildIds = []) {
+    if (!this.client) throw new Error('Not logged in');
+    const parentId = String(parentSpaceId || '').trim();
+    if (!parentId.startsWith('!')) throw new Error('Parent space is required');
+    const ids = (Array.isArray(orderedChildIds) ? orderedChildIds : [])
+      .map((id) => String(id || '').trim())
+      .filter((id, index, all) => id.startsWith('!') && all.indexOf(id) === index);
+    if (!ids.length) throw new Error('childIds are required');
+
+    const updates = [];
+    for (let i = 0; i < ids.length; i += 1) {
+      const order = this.spaceChildOrderKey(i);
+      const prev = this.getSpaceChildStateContent(parentId, ids[i]);
+      if (prev?.order === order) continue;
+      updates.push({ id: ids[i], order });
+    }
+    if (updates.length) {
+      await Promise.all(
+        updates.map(({ id, order }) => this.setSpaceChild(parentId, id, { order })),
+      );
+    }
+    return { ok: true, parentSpaceId: parentId, childIds: ids, updated: updates.length };
+  }
+
+  /**
+   * Reorder only space-like children (categories) under a parent, preserving
+   * relative slots of non-space children (channels) in the m.space.child list.
+   */
+  async reorderSpaceCategories(parentSpaceId, orderedCategoryIds = []) {
+    if (!this.client) throw new Error('Not logged in');
+    const parentId = String(parentSpaceId || '').trim();
+    if (!parentId.startsWith('!')) throw new Error('Parent space is required');
+    const parent = this.client.getRoom(parentId);
+    if (!parent || !this.isSpaceLikeRoom(parent)) throw new Error('Parent space not found');
+
+    const wanted = (Array.isArray(orderedCategoryIds) ? orderedCategoryIds : [])
+      .map((id) => String(id || '').trim())
+      .filter((id, index, all) => id.startsWith('!') && all.indexOf(id) === index);
+    if (!wanted.length) throw new Error('categoryIds are required');
+
+    const entries = this.getSpaceChildEntries(parent);
+    const isCategoryId = (id) => {
+      const room = this.client.getRoom(id);
+      return Boolean(room && this.isSpaceLikeRoom(room));
+    };
+
+    const next = [];
+    const emitted = new Set();
+    let wantIdx = 0;
+    for (const entry of entries) {
+      if (isCategoryId(entry.roomId)) {
+        while (wantIdx < wanted.length && emitted.has(wanted[wantIdx])) wantIdx += 1;
+        if (wantIdx < wanted.length) {
+          const id = wanted[wantIdx];
+          wantIdx += 1;
+          next.push(id);
+          emitted.add(id);
+        }
+      } else {
+        next.push(entry.roomId);
+      }
+    }
+    while (wantIdx < wanted.length) {
+      const id = wanted[wantIdx];
+      wantIdx += 1;
+      if (emitted.has(id)) continue;
+      next.push(id);
+      emitted.add(id);
+    }
+
+    // Keep any existing non-listed categories that were skipped (shouldn't happen).
+    for (const entry of entries) {
+      if (isCategoryId(entry.roomId) && !emitted.has(entry.roomId)) {
+        next.push(entry.roomId);
+        emitted.add(entry.roomId);
+      }
+    }
+
+    await this.reorderSpaceChildren(parentId, next);
+    return { ok: true, parentSpaceId: parentId, categoryIds: wanted, childIds: next };
+  }
+
+  /**
+   * Move a child room/space to another parent (or reorder within the same parent).
+   * beforeId = place before this sibling; afterId = place after this sibling; null = append.
+   */
+  async moveSpaceChild({
+    fromParentId = null,
+    toParentId,
+    childId,
+    beforeId = null,
+    afterId = null,
+  } = {}) {
+    if (!this.client) throw new Error('Not logged in');
+    const childRoomId = String(childId || '').trim();
+    const destParentId = String(toParentId || '').trim();
+    const srcParentId = String(fromParentId || '').trim();
+    if (!childRoomId.startsWith('!') || !destParentId.startsWith('!')) {
+      throw new Error('toParentId and childId are required');
+    }
+    if (childRoomId === destParentId) throw new Error('Cannot move a space into itself');
+
+    const dest = this.client.getRoom(destParentId);
+    if (!dest || !this.isSpaceLikeRoom(dest)) throw new Error('Destination space not found');
+
+    const destEntries = this.getSpaceChildEntries(dest);
+    const orderById = new Map(destEntries.map((entry) => [entry.roomId, entry.order]));
+    const siblings = destEntries.map((entry) => entry.roomId).filter((id) => id !== childRoomId);
+
+    let insertIdx = siblings.length;
+    const before = String(beforeId || '').trim();
+    const after = String(afterId || '').trim();
+    if (before.startsWith('!') && siblings.includes(before)) {
+      insertIdx = siblings.indexOf(before);
+    } else if (after.startsWith('!') && siblings.includes(after)) {
+      insertIdx = siblings.indexOf(after) + 1;
+    }
+
+    const beforeOrder = insertIdx > 0 ? orderById.get(siblings[insertIdx - 1]) : null;
+    const afterOrder = insertIdx < siblings.length ? orderById.get(siblings[insertIdx]) : null;
+    const newOrder = this.orderKeyBetween(beforeOrder, afterOrder);
+
+    if (srcParentId.startsWith('!') && srcParentId !== destParentId) {
+      try {
+        await this.removeSpaceChild(srcParentId, childRoomId);
+      } catch (error) {
+        console.warn('[MatrixSession] removeSpaceChild on move failed', error?.message || error);
+      }
+      // Keep canonical parent pointer when possible.
+      try {
+        const via = this.resolveSpaceChildVia(destParentId, childRoomId);
+        await this.client.sendStateEvent(
+          childRoomId,
+          'm.space.parent',
+          { via, canonical: true },
+          destParentId,
+        );
+      } catch {
+        // ignore — not all rooms allow parent state edits
+      }
+    }
+
+    await this.setSpaceChild(destParentId, childRoomId, { order: newOrder });
+
+    const next = [...siblings];
+    next.splice(insertIdx, 0, childRoomId);
+    return {
+      ok: true,
+      childId: childRoomId,
+      fromParentId: srcParentId || null,
+      toParentId: destParentId,
+      childIds: next,
+    };
+  }
+
+  /**
+   * Delete a category (nested space): unlink from parent, then leave (+ forget).
+   */
+  async deleteCategory(categoryId, { parentSpaceId = null } = {}) {
+    if (!this.client) throw new Error('Not logged in');
+    const categoryRoomId = String(categoryId || '').trim();
+    if (!categoryRoomId.startsWith('!')) throw new Error('Category id is required');
+
+    let parentId = String(parentSpaceId || '').trim();
+    if (!parentId.startsWith('!')) {
+      const categoryRoom = this.client.getRoom(categoryRoomId);
+      if (categoryRoom) {
+        const parents = [...this.getJoinedParentSpaceIds(categoryRoom)];
+        parentId = parents.find((id) => id && id !== categoryRoomId) || '';
+      }
+    }
+
+    let unlinked = false;
+    if (parentId.startsWith('!')) {
+      try {
+        await this.removeSpaceChild(parentId, categoryRoomId);
+        unlinked = true;
+      } catch (error) {
+        // Still leave the category even if we lack power to edit parent state.
+        console.warn(
+          '[MatrixSession] removeSpaceChild failed',
+          error?.message || error,
+        );
+      }
+    }
+
+    const left = await this.leaveSpace(categoryRoomId);
+    return {
+      ok: true,
+      categoryId: categoryRoomId,
+      parentSpaceId: parentId || null,
+      unlinked,
+      ...left,
+    };
   }
 
   async leaveRoom(roomId) {
@@ -2512,7 +3046,8 @@ class MatrixSession {
     }
 
     try {
-      await this.client.sendReadReceipt(last);
+      // Unthreaded public receipts so the other party can see we've read.
+      await this.client.sendReadReceipt(last, undefined, true);
     } catch {
       // ignore
     }
@@ -2689,6 +3224,7 @@ class MatrixSession {
 
   async setupEncryption({
     recoveryKey = null,
+    password = null,
     setupNewCrossSigning = false,
     setupBackup = true,
   } = {}) {
@@ -2698,7 +3234,9 @@ class MatrixSession {
     const userId = this.client.getUserId();
     if (!userId) throw new Error('Missing user id');
 
-    const trimmedRecovery = String(recoveryKey || '').trim();
+    const trimmedRecovery = String(recoveryKey || '')
+      .trim()
+      .replace(/\s+/g, ' ');
     if (trimmedRecovery) {
       try {
         const { decodeRecoveryKey } = await loadRecoveryKeyHelpers();
@@ -2718,29 +3256,69 @@ class MatrixSession {
       this.cachedRecoveryKey || encodeRecoveryKey(this.secretStoragePrivateKey);
 
     // Unlock existing secret storage with the recovery key (no account password).
-    await crypto.bootstrapSecretStorage({
-      createSecretStorageKey: async () => ({
-        privateKey: this.secretStoragePrivateKey,
-        encodedPrivateKey: encoded,
-      }),
-      setupNewSecretStorage: Boolean(setupNewCrossSigning),
-      setupNewKeyBackup: Boolean(setupBackup) && Boolean(setupNewCrossSigning),
-    });
+    try {
+      await crypto.bootstrapSecretStorage({
+        createSecretStorageKey: async () => ({
+          privateKey: this.secretStoragePrivateKey,
+          encodedPrivateKey: encoded,
+        }),
+        setupNewSecretStorage: Boolean(setupNewCrossSigning),
+        setupNewKeyBackup: Boolean(setupBackup) && Boolean(setupNewCrossSigning),
+      });
+    } catch (error) {
+      const message = error?.message || String(error);
+      if (/secret.?storage|default key|m\.secret_storage|wrong|decrypt|mac/i.test(message)) {
+        throw new Error(
+          'Could not open secret storage with this recovery key. Confirm it matches a verified client.',
+        );
+      }
+      throw error;
+    }
+
+    const authUploadDeviceSigningKeys = async (makeRequest) => {
+      try {
+        return await makeRequest(null);
+      } catch (error) {
+        const data = error?.data || {};
+        const status = error?.httpStatus || error?.statusCode || error?.status;
+        const needsUia =
+          Number(status) === 401 ||
+          Boolean(data.session) ||
+          Array.isArray(data.flows);
+        if (!needsUia) throw error;
+        const pwd = String(password || '');
+        if (!pwd) {
+          const err = new Error(
+            'Account password required to finish verifying this device.',
+          );
+          err.code = 'NEEDS_PASSWORD';
+          err.needsPassword = true;
+          err.session = data.session || null;
+          throw err;
+        }
+        return makeRequest(this.buildPasswordAuth(data, pwd));
+      }
+    };
 
     try {
       await crypto.bootstrapCrossSigning({
         setupNewCrossSigning: Boolean(setupNewCrossSigning),
-        authUploadDeviceSigningKeys: async () => {
-          throw new Error(
-            'Could not unlock cross-signing with this recovery key. Confirm the key matches another verified client.',
-          );
-        },
+        authUploadDeviceSigningKeys,
       });
     } catch (error) {
+      if (error?.code === 'NEEDS_PASSWORD' || error?.needsPassword) throw error;
       const message = error?.message || String(error);
-      if (/authUploadDeviceSigningKeys|password|UIA|401|403/i.test(message)) {
+      if (/NEEDS_PASSWORD|password required/i.test(message)) {
+        const err = new Error(
+          'Account password required to finish verifying this device.',
+        );
+        err.code = 'NEEDS_PASSWORD';
+        err.needsPassword = true;
+        throw err;
+      }
+      if (/authUploadDeviceSigningKeys|UIA|401|403|password/i.test(message)) {
         throw new Error(
-          'Could not unlock cross-signing with this recovery key. Confirm the key matches another verified client.',
+          'Could not finish cross-signing. Check your recovery key, or try again with your account password.',
         );
       }
       throw error;
@@ -2778,13 +3356,19 @@ class MatrixSession {
     };
   }
 
-  async enableKeyBackup({ recoveryKey } = {}) {
-    return this.setupEncryption({ recoveryKey, setupNewCrossSigning: false, setupBackup: true });
-  }
-
-  async verifyOwnDevice({ recoveryKey } = {}) {
+  async enableKeyBackup({ recoveryKey, password } = {}) {
     return this.setupEncryption({
       recoveryKey,
+      password,
+      setupNewCrossSigning: false,
+      setupBackup: true,
+    });
+  }
+
+  async verifyOwnDevice({ recoveryKey, password } = {}) {
+    return this.setupEncryption({
+      recoveryKey,
+      password,
       setupNewCrossSigning: false,
       setupBackup: true,
     });
@@ -2807,9 +3391,10 @@ class MatrixSession {
     return this.listDevices();
   }
 
-  async resetCrossSigning({ recoveryKey } = {}) {
+  async resetCrossSigning({ recoveryKey, password } = {}) {
     return this.setupEncryption({
       recoveryKey,
+      password,
       setupNewCrossSigning: true,
       setupBackup: true,
     });
@@ -2931,7 +3516,7 @@ class MatrixSession {
       .map((member) => ({
         userId: member.userId,
         displayName: this.getMemberDisplayName(room, member.userId),
-        avatarUrl: this.getLocalProfileAvatarPath(member.userId, 32),
+        avatarUrl: this.getLocalProfileAvatarPath(member.userId, 64),
         hasAvatar: Boolean(this.getAvatarMxc(member.userId, room)),
       }))
       .sort((a, b) =>
@@ -2957,10 +3542,14 @@ class MatrixSession {
 
     const members =
       typeof room.getJoinedMembers === 'function' ? room.getJoinedMembers() : [];
+    const dmPeerId = this.getDmPeerUserId(room);
     const readers = [];
     for (const member of members) {
       const userId = member?.userId;
+      // Only other people — never treat yourself as a "seen by" entry.
       if (!userId || userId === myId) continue;
+      // Bridge DMs: only the human peer counts, not bots/apps in the room.
+      if (dmPeerId && userId !== dmPeerId) continue;
       let eventId = null;
       try {
         eventId =
@@ -2969,16 +3558,30 @@ class MatrixSession {
       } catch {
         eventId = null;
       }
-      if (!eventId) continue;
       readers.push({
         userId,
         eventId,
-        index: eventIndex.has(eventId) ? eventIndex.get(eventId) : -1,
+        index: eventId && eventIndex.has(eventId) ? eventIndex.get(eventId) : -1,
         displayName: this.getMemberDisplayName(room, userId),
-        avatarUrl: this.getLocalProfileAvatarPath(userId, 24),
+        avatarUrl: this.getLocalProfileAvatarPath(userId, 64),
         hasAvatar: Boolean(this.getAvatarMxc(userId, room)),
       });
     }
+
+    const userHasRead = (userId, eventId, fallbackIndex) => {
+      if (!userId || !eventId) return false;
+      try {
+        if (typeof room.hasUserReadEvent === 'function') {
+          return Boolean(room.hasUserReadEvent(userId, eventId));
+        }
+      } catch {
+        // fall through to index walk
+      }
+      if (fallbackIndex < 0) return false;
+      const eventIdx = eventIndex.has(eventId) ? eventIndex.get(eventId) : -1;
+      if (eventIdx < 0) return false;
+      return fallbackIndex >= eventIdx;
+    };
 
     // Matrix receipts are "read up to": anyone whose marker is at or after an
     // event has seen that event (Paarrot/Cinny getUsersReadUpTo walk).
@@ -2987,7 +3590,7 @@ class MatrixSession {
       if (!id) continue;
       const list = [];
       for (const reader of readers) {
-        if (reader.index < i) continue;
+        if (!userHasRead(reader.userId, id, reader.index)) continue;
         list.push({
           userId: reader.userId,
           displayName: reader.displayName,
@@ -3000,7 +3603,7 @@ class MatrixSession {
 
     // Exact marker events missing from the live timeline still get their reader.
     for (const reader of readers) {
-      if (byEvent.has(reader.eventId)) continue;
+      if (!reader.eventId || byEvent.has(reader.eventId)) continue;
       byEvent.set(reader.eventId, [
         {
           userId: reader.userId,
@@ -3022,6 +3625,104 @@ class MatrixSession {
     }
     await this.client.invite(roomId, user);
     return { ok: true, roomId, userId: user };
+  }
+
+  isDirectInviteRoom(room) {
+    if (!room) return false;
+    try {
+      const create = room.currentState?.getStateEvents?.('m.room.create', '')?.getContent?.();
+      if (create?.is_direct) return true;
+    } catch {
+      // ignore
+    }
+    try {
+      const joined = room.getMembersWithMembership?.('join') || [];
+      const invited = room.getMembersWithMembership?.('invite') || [];
+      if (joined.length + invited.length === 2) return true;
+    } catch {
+      // ignore
+    }
+    return false;
+  }
+
+  isDirectRoom(room) {
+    if (!room) return false;
+    if (this.getDirectRoomIdSet().has(room.roomId)) return true;
+    try {
+      const create = room.currentState?.getStateEvents?.('m.room.create', '')?.getContent?.();
+      if (create?.is_direct) return true;
+    } catch {
+      // ignore
+    }
+    return false;
+  }
+
+  isDmSidebarRoom(room, organizedIds = null) {
+    if (!this.isDirectRoom(room)) return false;
+    return !this.isRoomInJoinedSpaceHierarchy(room, organizedIds);
+  }
+
+  /** Joined channels that are neither DMs nor listed under any joined space. */
+  isHomeSidebarRoom(room, organizedIds = null) {
+    if (!room || !this.isJoinedRoom(room) || this.isSpaceLikeRoom(room)) return false;
+    if (this.isDirectRoom(room)) return false;
+    return !this.isRoomInJoinedSpaceHierarchy(room, organizedIds);
+  }
+
+  async ensureDirectRoomInAccountData(room) {
+    if (!this.client || !room || !this.isDirectRoom(room)) return;
+    const peerId = this.getDmPeerUserId(room);
+    if (!peerId) return;
+    try {
+      const event = this.client.getAccountData?.('m.direct');
+      const content = { ...(event?.getContent?.() || {}) };
+      const list = Array.isArray(content[peerId]) ? [...content[peerId]] : [];
+      if (!list.includes(room.roomId)) list.unshift(room.roomId);
+      content[peerId] = list;
+      await this.client.setAccountData('m.direct', content);
+    } catch {
+      // DM still works without m.direct update
+    }
+  }
+
+  findSpaceFilterForRoom(roomId) {
+    if (!this.client || !roomId) return 'home';
+    const room = this.client.getRoom(roomId);
+
+    const collectSidebarRoomIds = (spaceId) => {
+      const ids = new Set();
+      const sidebar = this.listSpaceSidebar(spaceId);
+      for (const entry of sidebar.rooms || []) {
+        if (entry?.roomId) ids.add(entry.roomId);
+      }
+      for (const group of sidebar.groups || []) {
+        for (const item of group.items || []) {
+          if (item?.roomId) ids.add(item.roomId);
+          if (item?.type === 'subspace' && item.spaceId) {
+            for (const nestedId of collectSidebarRoomIds(item.spaceId)) {
+              ids.add(nestedId);
+            }
+          }
+        }
+      }
+      return ids;
+    };
+
+    for (const space of this.listSpaces()) {
+      if (space.spaceId === roomId) return space.spaceId;
+      if (collectSidebarRoomIds(space.spaceId).has(roomId)) return space.spaceId;
+    }
+
+    // Nested spaces that are not on the guild rail still need a filter target.
+    for (const candidate of this.client.getRooms() || []) {
+      if (!this.isSpaceLikeRoom(candidate) || !this.isJoinedRoom(candidate)) continue;
+      if (candidate.roomId === roomId) return candidate.roomId;
+      if (this.getSpaceChildIds(candidate).has(roomId)) return candidate.roomId;
+    }
+
+    if (room && this.isDmSidebarRoom(room)) return 'dms';
+    if (room && this.isHomeSidebarRoom(room)) return 'home';
+    return 'home';
   }
 
   getInviteInviter(room) {
@@ -3047,12 +3748,22 @@ class MatrixSession {
   serializeInvite(room) {
     const inviterId = this.getInviteInviter(room);
     const alias = room.getCanonicalAlias?.() || null;
+    const isDirect = this.isDirectInviteRoom(room);
+    const topicEvent = room.currentState?.getStateEvents?.('m.room.topic', '');
+    const topic = String(topicEvent?.getContent?.()?.topic || '').trim();
+    const name = room.name || alias || room.roomId;
     return {
       roomId: room.roomId,
-      name: room.name || alias || room.roomId,
+      name,
+      topic,
       isSpace: this.isSpaceRoom(room),
+      isDirect,
       inviterId,
       inviterName: inviterId ? this.getMemberDisplayName(room, inviterId) : null,
+      inviterAvatarUrl: inviterId ? this.getLocalProfileAvatarPath(inviterId, 48) : null,
+      hasInviterAvatar: inviterId
+        ? Boolean(this.getProfileAvatarRemoteUrl(inviterId, 48))
+        : false,
       avatarUrl: this.getLocalAvatarPath(room.roomId, 48),
       hasAvatar: Boolean(this.getRoomAvatarUrl(room, 48)),
       alias,
@@ -3064,16 +3775,17 @@ class MatrixSession {
 
   listInvites() {
     if (!this.client) return [];
-    return (this.client.getRooms() || [])
-      .filter((room) => {
-        try {
-          return room.getMyMembership?.() === 'invite';
-        } catch {
-          return false;
-        }
-      })
-      .map((room) => this.serializeInvite(room))
-      .sort((a, b) => a.name.localeCompare(b.name));
+    const byId = new Map();
+    for (const room of this.client.getRooms() || []) {
+      try {
+        if (room.getMyMembership?.() !== 'invite') continue;
+      } catch {
+        continue;
+      }
+      if (!room.roomId || byId.has(room.roomId)) continue;
+      byId.set(room.roomId, this.serializeInvite(room));
+    }
+    return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
   }
 
   async acceptInvite(roomId) {
@@ -3081,13 +3793,23 @@ class MatrixSession {
     const id = String(roomId || '').trim();
     if (!id) throw new Error('Room ID is required');
     await this.client.joinRoom(id);
-    const room = this.client.getRoom(id);
+    let room = this.client.getRoom(id);
+    for (let i = 0; i < 20 && !room; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      room = this.client.getRoom(id);
+    }
+    if (room) await this.ensureDirectRoomInAccountData(room);
+    const isSpace = room ? this.isSpaceRoom(room) : false;
+    const isDirect = room ? this.isDirectRoom(room) : false;
+    const spaceFilter = isSpace ? id : this.findSpaceFilterForRoom(id);
     return {
       ok: true,
       roomId: id,
-      isSpace: room ? this.isSpaceRoom(room) : false,
+      isSpace,
+      isDirect,
+      spaceFilter,
       summary: room
-        ? this.isSpaceRoom(room)
+        ? isSpace
           ? this.getSpaceSummary(id)
           : this.getRoomSummary(id)
         : null,
@@ -3336,13 +4058,38 @@ class MatrixSession {
     };
     await this.client.sendStateEvent(parentId, 'm.space.child', childContent, roomId);
 
+    const createdRoom = this.client.getRoom(roomId);
+    const isCreatedSpace = Boolean(isSpace) || (wantForum && isSpace);
+    let room = null;
+    if (!isCreatedSpace) {
+      room = createdRoom
+        ? this.serializeRoom(createdRoom)
+        : {
+            roomId,
+            name: childName,
+            topic: childTopic || '',
+            unread: 0,
+            lastEventTs: Date.now(),
+            encrypted: Boolean(encryption) && !wantPublic,
+            isSpace: false,
+            isDirect: false,
+            permalink: `https://matrix.to/#/${roomId}`,
+            avatarUrl: null,
+            hasAvatar: false,
+            memberCount: 1,
+            joinRule: wantPublic ? 'public' : wantRestricted ? 'restricted' : 'invite',
+          };
+      if (room && room.name !== childName) room = { ...room, name: childName };
+    }
+
     return {
       ok: true,
       roomId,
       parentSpaceId: parentId,
-      isSpace: Boolean(isSpace) || (wantForum && isSpace),
+      isSpace: isCreatedSpace,
       isForum: wantForum && Boolean(isSpace),
       name: childName,
+      room,
     };
   }
 
@@ -3461,6 +4208,73 @@ class MatrixSession {
       isSpace: false,
       isSubRoom: true,
       name: childName,
+    };
+  }
+
+  /**
+   * Browse public rooms/spaces on a remote homeserver directory.
+   * Does not default to the user's own homeserver — callers pick the server.
+   */
+  async explorePublicRooms({
+    server,
+    term = '',
+    limit = 24,
+    since = null,
+    roomTypes,
+  } = {}) {
+    if (!this.client) throw new Error('Not logged in');
+    const serverName = String(server || '')
+      .trim()
+      .replace(/^https?:\/\//i, '')
+      .replace(/\/+$/, '')
+      .split('/')[0];
+    if (!serverName) throw new Error('Server is required');
+
+    const opts = {
+      server: serverName,
+      limit: Math.min(Math.max(Number(limit) || 24, 1), 100),
+    };
+    if (since) opts.since = String(since);
+
+    const filter = {};
+    const search = String(term || '').trim();
+    if (search) filter.generic_search_term = search;
+    if (Array.isArray(roomTypes)) filter.room_types = roomTypes;
+    if (Object.keys(filter).length) opts.filter = filter;
+
+    const result = await this.client.publicRooms(opts);
+    const rooms = (result?.chunk || []).map((room) => {
+      const avatarMxc = room?.avatar_url || null;
+      let avatarHttp = null;
+      if (avatarMxc && typeof this.client.mxcUrlToHttp === 'function') {
+        try {
+          avatarHttp =
+            this.client.mxcUrlToHttp(avatarMxc, 96, 96, 'crop', false, true, true) || null;
+        } catch {
+          avatarHttp = null;
+        }
+      }
+      return {
+        roomId: room.room_id,
+        name: room.name || room.canonical_alias || room.room_id,
+        topic: room.topic || '',
+        alias: room.canonical_alias || null,
+        avatarUrl: avatarMxc,
+        avatarHttp,
+        memberCount: Number(room.num_joined_members) || 0,
+        joinRule: room.join_rule || null,
+        worldReadable: Boolean(room.world_readable),
+        guestCanJoin: Boolean(room.guest_can_join),
+        roomType: room.room_type || null,
+        isSpace: room.room_type === 'm.space',
+      };
+    });
+
+    return {
+      server: serverName,
+      rooms,
+      nextBatch: result?.next_batch || null,
+      total: result?.total_room_count_estimate ?? null,
     };
   }
 
@@ -3642,7 +4456,7 @@ class MatrixSession {
       type,
       sender,
       senderName: this.getMemberDisplayName(room, sender),
-      senderAvatarUrl: this.getLocalProfileAvatarPath(sender, 48),
+      senderAvatarUrl: this.getLocalProfileAvatarPath(sender, 96),
       hasSenderAvatar: Boolean(this.getProfileAvatarRemoteUrl(sender, 48)),
       senderStyle: this.getCachedProfileStyle(sender),
       senderPresence: this.getUserPresence(sender) || 'offline',
@@ -3745,7 +4559,7 @@ class MatrixSession {
           roomName: room?.name || roomId || 'Room',
           sender,
           senderName: room ? this.getMemberDisplayName(room, sender) : sender,
-          senderAvatarUrl: this.getLocalProfileAvatarPath(sender, 48),
+          senderAvatarUrl: this.getLocalProfileAvatarPath(sender, 96),
           hasSenderAvatar: Boolean(this.getProfileAvatarRemoteUrl(sender, 48)),
           senderStyle: this.getCachedProfileStyle(sender),
           ts: ev.getTs?.() || 0,
@@ -3801,7 +4615,7 @@ class MatrixSession {
           roomName: room.name || room.roomId,
           sender,
           senderName: this.getMemberDisplayName(room, sender),
-          senderAvatarUrl: this.getLocalProfileAvatarPath(sender, 48),
+          senderAvatarUrl: this.getLocalProfileAvatarPath(sender, 96),
           hasSenderAvatar: Boolean(this.getProfileAvatarRemoteUrl(sender, 48)),
           senderStyle: this.getCachedProfileStyle(sender),
           ts: ev.getTs?.() || 0,
@@ -3873,7 +4687,7 @@ class MatrixSession {
         return {
           userId,
           displayName: this.getMemberDisplayName(room, userId),
-          avatarUrl: this.getLocalProfileAvatarPath(userId, 48),
+          avatarUrl: this.getLocalProfileAvatarPath(userId, 96),
           hasAvatar: Boolean(avatarMxc),
           presence,
           online: presence === 'online',
@@ -3945,6 +4759,55 @@ class MatrixSession {
       updates.joinRule = rule;
     }
     return { ok: true, roomId, ...updates, room: this.serializeRoom(room) };
+  }
+
+  async uploadRoomAvatar(roomId, dataUrl) {
+    if (!this.client) throw new Error('Not logged in');
+    const id = String(roomId || '').trim();
+    const room = this.client.getRoom(id);
+    if (!room || !this.isJoinedRoom(room)) throw new Error('Room not found');
+
+    const match = /^data:([^;]+);base64,(.+)$/s.exec(String(dataUrl || ''));
+    if (!match) throw new Error('Invalid image data');
+    const buffer = Buffer.from(match[2], 'base64');
+    const contentType = this.normalizeImageContentType(match[1] || 'image/png', '', buffer);
+    const ext =
+      contentType === 'image/jpeg'
+        ? 'jpg'
+        : contentType === 'image/gif'
+          ? 'gif'
+          : contentType === 'image/webp'
+            ? 'webp'
+            : contentType === 'image/apng'
+              ? 'apng'
+              : contentType === 'image/avif'
+                ? 'avif'
+                : 'png';
+    const upload = await this.client.uploadContent(buffer, {
+      type: contentType === 'image/apng' ? 'image/png' : contentType,
+      name: `room-avatar.${ext}`,
+      rawResponse: false,
+    });
+    const mxc = typeof upload === 'string' ? upload : upload?.content_uri;
+    if (!mxc) throw new Error('Upload failed');
+
+    await this.client.sendStateEvent(id, 'm.room.avatar', { url: mxc }, '');
+    return {
+      ok: true,
+      roomId: id,
+      mxc,
+      room: this.serializeRoom(room),
+    };
+  }
+
+  async removeRoomAvatar(roomId) {
+    if (!this.client) throw new Error('Not logged in');
+    const id = String(roomId || '').trim();
+    const room = this.client.getRoom(id);
+    if (!room || !this.isJoinedRoom(room)) throw new Error('Room not found');
+    // Empty content clears m.room.avatar (same pattern as removing space children).
+    await this.client.sendStateEvent(id, 'm.room.avatar', {}, '');
+    return { ok: true, roomId: id, room: this.serializeRoom(room) };
   }
 
   async moderateMember(roomId, userId, action, { reason } = {}) {
@@ -4336,9 +5199,12 @@ class MatrixSession {
       addSubRooms(child, 0);
     }
 
-    // Drop empty non-root sections only if they have no items (keep Rooms if empty for lobby add).
+    // Keep empty nested categories so Discord-style "Create Category" stays visible.
     const pruned = groups.filter(
-      (group) => group.items.length > 0 || group.spaceId === spaceId,
+      (group) =>
+        group.items.length > 0 ||
+        group.spaceId === spaceId ||
+        group.type === 'folder',
     );
 
     const parents = [...this.getJoinedParentSpaceIds(spaceRoom)]
@@ -4390,23 +5256,34 @@ class MatrixSession {
       }
     }
 
+    const spaceOrganizedIds =
+      filter === 'dms' || filter === 'home' ? this.getSpaceOrganizedRoomIds() : null;
+
     return rooms
       .filter((room) => {
         if (!this.isJoinedRoom(room)) return false;
         if (this.isSpaceLikeRoom(room)) return false;
 
         if (filter === 'dms') {
-          return directIds.has(room.roomId);
+          return this.isDmSidebarRoom(room, spaceOrganizedIds);
+        }
+
+        if (filter === 'home') {
+          return this.isHomeSidebarRoom(room, spaceOrganizedIds);
         }
 
         if (selectedChildIds) {
           return selectedChildIds.has(room.roomId);
         }
 
-        // home: all joined non-space rooms
+        // Non-space filters: all joined channel rooms (excluding DMs on home).
         return true;
       })
-      .map((room) => this.serializeRoom(room, { isDirect: directIds.has(room.roomId) }))
+      .map((room) =>
+        this.serializeRoom(room, {
+          isDirect: filter === 'dms' ? true : this.isDirectRoom(room),
+        }),
+      )
       .sort((a, b) => {
         const aVoice = Array.isArray(a.voiceMembers) && a.voiceMembers.length > 0 ? 1 : 0;
         const bVoice = Array.isArray(b.voiceMembers) && b.voiceMembers.length > 0 ? 1 : 0;
@@ -4442,7 +5319,7 @@ class MatrixSession {
       const original =
         this.client.mxcUrlToHttp(mxc, undefined, undefined, undefined, false, true, true) || null;
       const thumb =
-        this.client.mxcUrlToHttp(mxc, 480, 480, 'scale', false, true, true) || null;
+        this.client.mxcUrlToHttp(mxc, 1280, 1280, 'scale', false, true, true) || null;
       const large =
         this.client.mxcUrlToHttp(mxc, 2048, 2048, 'scale', false, true, true) ||
         original ||
@@ -4503,7 +5380,7 @@ class MatrixSession {
           type: type || 'm.room.message',
           sender,
           senderName: this.getMemberDisplayName(room, sender),
-          senderAvatarUrl: this.getLocalProfileAvatarPath(sender, 48),
+          senderAvatarUrl: this.getLocalProfileAvatarPath(sender, 96),
           hasSenderAvatar: Boolean(this.getProfileAvatarRemoteUrl(sender, 48)),
           senderStyle: this.getCachedProfileStyle(sender),
           senderPresence: this.getUserPresence(sender) || 'offline',
@@ -4552,20 +5429,21 @@ class MatrixSession {
         } else if (membership === 'join' && prevMembership !== 'join') {
           systemAction = 'join';
           body = `${targetName} joined the room`;
-        } else if (membership === 'leave') {
+        } else if (membership === 'leave' && prevMembership !== 'leave') {
           systemAction = sender === targetId ? 'leave' : 'kick';
           body =
             sender === targetId
               ? `${targetName} left the room`
               : `${senderName} removed ${targetName}`;
-        } else if (membership === 'ban') {
+        } else if (membership === 'ban' && prevMembership !== 'ban') {
           systemAction = 'ban';
           body = `${senderName} banned ${targetName}`;
-        } else if (membership === 'invite') {
+        } else if (membership === 'invite' && prevMembership !== 'invite') {
           systemAction = 'invite';
           body = `${senderName} invited ${targetName}`;
         } else {
-          body = `${targetName}: ${membership || 'membership update'}`;
+          // Same membership with no profile change (e.g. "@user: join") — timeline noise.
+          continue;
         }
 
         out.push({
@@ -4584,6 +5462,8 @@ class MatrixSession {
           msgtype: null,
           systemKind,
           systemAction,
+          systemTargetId: targetId || null,
+          systemTargetName: targetName || null,
           encrypted: false,
           redacted: false,
           readBy: [],
@@ -4677,8 +5557,18 @@ class MatrixSession {
       let videoInfo = null;
       let videoPosterUrl = null;
       let carousel = null;
+      let fileUrl = null;
+      let fileFullUrl = null;
+      let fileMxc = null;
+      let fileFilename = null;
+      let fileInfo = null;
 
-      if (msgtype === 'm.image' && content.url && this.client) {
+      if (
+        (msgtype === 'm.image' ||
+          (msgtype === 'm.file' && this.isPreviewableImageAttachment(mime, filename || ''))) &&
+        content.url &&
+        this.client
+      ) {
         imageMxc = content.url;
         // Prefer explicit filename; legacy clients used body as the filename.
         imageFilename = filename || (typeof body === 'string' ? body : null) || 'image';
@@ -4688,6 +5578,12 @@ class MatrixSession {
         imageFullUrl = resolved.fullUrl;
         imageSpoiler = spoiler;
         imageInfo = this.parseMediaInfo(content.info);
+        if (imageInfo && (!imageInfo.mimeType || imageInfo.mimeType === 'application/octet-stream')) {
+          imageInfo = {
+            ...imageInfo,
+            mimeType: this.normalizeImageContentType(mime, imageFilename),
+          };
+        }
         const uuid = content['com.paarrot.carousel_uuid'];
         const index = content['com.paarrot.carousel_index'];
         const total = content['com.paarrot.carousel_total'];
@@ -4703,7 +5599,7 @@ class MatrixSession {
       } else if (
         (msgtype === 'm.video' ||
           (msgtype === 'm.file' &&
-            (/^video\//i.test(mime) || /\.(webm|mp4|mov|mkv|ogv)$/i.test(filename)))) &&
+            (/^video\//i.test(mime) || /\.(webm|mp4|mov|mkv|ogv)$/i.test(filename || '')))) &&
         content.url &&
         this.client
       ) {
@@ -4718,11 +5614,23 @@ class MatrixSession {
             this.resolveMediaHttp(content.info.thumbnail_url, { preferOriginal: false }).url ||
             null;
         }
+      } else if (
+        (msgtype === 'm.file' || msgtype === 'm.audio') &&
+        content.url &&
+        this.client
+      ) {
+        fileMxc = content.url;
+        fileFilename = filename || (typeof body === 'string' ? body : null) || 'file';
+        const resolved = this.resolveMediaHttp(content.url, { preferOriginal: true });
+        fileUrl = resolved.fullUrl || resolved.url;
+        fileFullUrl = resolved.fullUrl || fileUrl;
+        fileInfo = this.parseMediaInfo(content.info);
       }
 
-      const hasImage = msgtype === 'm.image' && Boolean(imageUrl || imageMxc);
+      const hasImage = Boolean(imageUrl || imageMxc);
       const hasVideo = Boolean(videoUrl || videoMxc);
-      if (!encrypted && !hasImage && !hasVideo && !(body && body.trim())) continue;
+      const hasFile = Boolean(fileUrl || fileMxc);
+      if (!encrypted && !hasImage && !hasVideo && !hasFile && !(body && body.trim())) continue;
 
       let canRedact = false;
       try {
@@ -4764,7 +5672,7 @@ class MatrixSession {
         type,
         sender,
         senderName: this.getMemberDisplayName(room, sender),
-        senderAvatarUrl: this.getLocalProfileAvatarPath(sender, 48),
+        senderAvatarUrl: this.getLocalProfileAvatarPath(sender, 96),
         hasSenderAvatar: Boolean(this.getProfileAvatarRemoteUrl(sender, 48)),
         senderStyle: this.getCachedProfileStyle(sender),
         senderPresence: this.getUserPresence(sender) || 'offline',
@@ -4787,10 +5695,19 @@ class MatrixSession {
         videoFilename,
         videoInfo,
         videoPosterUrl,
+        fileUrl,
+        fileFullUrl,
+        fileMxc,
+        fileFilename,
+        fileInfo,
         carousel,
         gallery: null,
         urls:
-          typeof displayBody === 'string' && msgtype !== 'm.image' && msgtype !== 'm.video'
+          typeof displayBody === 'string' &&
+          msgtype !== 'm.image' &&
+          msgtype !== 'm.video' &&
+          msgtype !== 'm.file' &&
+          msgtype !== 'm.audio'
             ? extractUrls(displayBody, { limit: 2 })
             : [],
         encrypted,
@@ -5086,7 +6003,7 @@ class MatrixSession {
         for (const item of msg.gallery) pushImage(msg, item);
         continue;
       }
-      if (msg.msgtype === 'm.image') {
+      if (msg.msgtype === 'm.image' || msg.imageUrl || msg.imageMxc) {
         pushImage(msg);
         continue;
       }
@@ -5573,6 +6490,72 @@ class MatrixSession {
     return { eventId: result?.event_id || null, mxc, info };
   }
 
+  async sendFileBuffer(
+    roomId,
+    buffer,
+    {
+      contentType = 'application/octet-stream',
+      filename = 'file',
+      caption = null,
+      formatted_body = null,
+      mentions = null,
+    } = {},
+  ) {
+    if (!this.client) throw new Error('Not logged in');
+    if (!buffer || !buffer.length) throw new Error('File data is required');
+
+    const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+    const fileName = String(filename || 'file').trim() || 'file';
+    let mime = String(contentType || 'application/octet-stream')
+      .split(';')[0]
+      .trim()
+      .toLowerCase();
+    if (!mime || mime === 'application/octet-stream') {
+      const lower = fileName.toLowerCase();
+      if (lower.endsWith('.appimage')) mime = 'application/vnd.appimage';
+      else if (lower.endsWith('.pdf')) mime = 'application/pdf';
+      else if (lower.endsWith('.zip')) mime = 'application/zip';
+      else if (lower.endsWith('.tar')) mime = 'application/x-tar';
+      else if (lower.endsWith('.gz') || lower.endsWith('.tgz')) mime = 'application/gzip';
+      else if (lower.endsWith('.txt')) mime = 'text/plain';
+      else if (lower.endsWith('.json')) mime = 'application/json';
+      else mime = 'application/octet-stream';
+    }
+
+    const upload = await this.client.uploadContent(bytes, {
+      type: mime,
+      name: fileName,
+      rawResponse: false,
+    });
+    const mxc = typeof upload === 'string' ? upload : upload?.content_uri;
+    if (!mxc) throw new Error('Upload failed');
+
+    const captionText = typeof caption === 'string' ? caption.trim() : '';
+    const content = {
+      msgtype: 'm.file',
+      body: captionText || fileName,
+      filename: fileName,
+      info: {
+        mimetype: mime,
+        size: bytes.length,
+      },
+      url: mxc,
+    };
+    if (captionText && typeof formatted_body === 'string' && formatted_body.trim()) {
+      content.format = 'org.matrix.custom.html';
+      content.formatted_body = formatted_body.trim();
+    }
+    if (Array.isArray(mentions) && mentions.length) {
+      content['m.mentions'] = {
+        user_ids: mentions
+          .map((entry) => entry?.userId || entry)
+          .filter((id) => typeof id === 'string' && id.startsWith('@')),
+      };
+    }
+    const result = await this.client.sendMessage(roomId, content);
+    return { eventId: result?.event_id || null, mxc, info: content.info };
+  }
+
   /**
    * Best-effort width/height from common image headers (PNG/APNG/JPEG/GIF/WebP).
    */
@@ -5733,7 +6716,29 @@ class MatrixSession {
     if (/\.bmp$/i.test(name)) return 'image/bmp';
     if (/\.avif$/i.test(name)) return 'image/avif';
     if (/\.heic$/i.test(name)) return 'image/heic';
+    if (/\.svg$/i.test(name)) return 'image/svg+xml';
     return type.startsWith('image/') ? type : 'image/png';
+  }
+
+  /**
+   * m.file attachments that are still safe to show as an inline image preview
+   * (SVG often arrives as application/octet-stream).
+   */
+  isPreviewableImageAttachment(contentType, filename = '') {
+    const type = String(contentType || '')
+      .split(';')[0]
+      .trim()
+      .toLowerCase();
+    const name = String(filename || '').toLowerCase();
+    if (type === 'image/svg+xml' || /\.svg$/i.test(name)) return true;
+    if (type.startsWith('image/')) return true;
+    if (
+      (!type || type === 'application/octet-stream') &&
+      /\.(png|apng|jpe?g|gif|webp|bmp|avif|heic|heif|svg)$/i.test(name)
+    ) {
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -5742,18 +6747,20 @@ class MatrixSession {
   prefersOriginalImageMedia(contentType, filename = '', buffer = null) {
     const type = this.normalizeImageContentType(contentType, filename, buffer);
     // Thumbnails flatten animation; APNG is often labeled image/png.
+    // SVG must stay original — thumbnail endpoints usually can't rasterize it.
     if (
       type === 'image/gif' ||
       type === 'image/webp' ||
       type === 'image/apng' ||
       type === 'image/png' ||
       type === 'image/avif' ||
-      type === 'image/heic'
+      type === 'image/heic' ||
+      type === 'image/svg+xml'
     ) {
       return true;
     }
     if (buffer && this.webpHasAnimation(buffer)) return true;
-    return /\.(gif|webp|apng|png|avif|heic)$/i.test(String(filename || ''));
+    return /\.(gif|webp|apng|png|avif|heic|svg)$/i.test(String(filename || ''));
   }
 
   async sendImageFromUrl(roomId, url, filename = 'image.gif') {

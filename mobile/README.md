@@ -12,7 +12,7 @@ Native shell around the Kitsu UI with **matrix-js-sdk** in the WebView. Logs int
 ## Use
 
 1. Open Kitsu on the phone.  
-2. Enter homeserver (e.g. `exau.dev`), username, and password.  
+2. Enter homeserver (e.g. `matrix.org`), username, and password.  
 3. Chat syncs and encrypts on-device (Rust crypto WASM + IndexedDB).
 
 ## Develop

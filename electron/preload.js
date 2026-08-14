@@ -7,7 +7,16 @@ contextBridge.exposeInMainWorld('relayDesktop', {
   openSource: () => ipcRenderer.invoke('relay:open-source'),
   getProtocolStatus: () => ipcRenderer.invoke('relay:protocol-status'),
   repairProtocol: () => ipcRenderer.invoke('relay:protocol-repair'),
+  focusWindow: () => ipcRenderer.invoke('relay:focus-window'),
   windowAction: (action) => ipcRenderer.invoke('relay:window-action', action),
+  isMaximized: () => ipcRenderer.invoke('relay:window-is-maximized'),
+  onMaximizedChange: (callback) => {
+    const handler = (_event, maximized) => {
+      if (typeof callback === 'function') callback(Boolean(maximized));
+    };
+    ipcRenderer.on('relay:window-maximized', handler);
+    return () => ipcRenderer.removeListener('relay:window-maximized', handler);
+  },
   isWindowFocused: () => ipcRenderer.invoke('relay:window-focused'),
   setSpellcheck: (enabled) => ipcRenderer.invoke('relay:set-spellcheck', Boolean(enabled)),
   getSpellcheck: () => ipcRenderer.invoke('relay:get-spellcheck'),

@@ -5,6 +5,7 @@ const { extractMetadataFromImage } = require('../paarrot/imageMetadata');
 const {
   AccountData: PaarrotAccountData,
   StateEvent: PaarrotStateEvent,
+  Profile: PaarrotProfile,
 } = require('../paarrot/constants');
 const {
   getPersonalEmbedFilters,
@@ -492,11 +493,7 @@ class MatrixSession {
       profileRaw = await this.client.getProfileInfo(id);
       if (profileRaw?.displayname) displayName = profileRaw.displayname;
       if (profileRaw?.avatar_url) avatarMxc = profileRaw.avatar_url;
-      bannerMxc =
-        profileRaw?.['m.banner_url'] ||
-        profileRaw?.['chat.commet.profile_banner'] ||
-        profileRaw?.banner_url ||
-        null;
+      bannerMxc = this.bannerMxcFromProfile(profileRaw);
     } catch {
       // fall back to local store
     }
@@ -505,13 +502,23 @@ class MatrixSession {
       if (typeof this.client.getExtendedProfileProperty === 'function') {
         const supported = await this.client.doesServerSupportExtendedProfiles?.();
         if (supported) {
-          const styleValue = await this.client.getExtendedProfileProperty(
-            id,
+          for (const key of [
             'app.relay.profile_style',
-          );
-          if (styleValue != null) {
-            profileRaw = { ...(profileRaw || {}), 'app.relay.profile_style': styleValue };
+            PaarrotProfile.Colors,
+            PaarrotProfile.ColorPreference,
+            PaarrotProfile.ColorPreferenceUnstable,
+            PaarrotProfile.BannerUrl,
+          ]) {
+            try {
+              const value = await this.client.getExtendedProfileProperty(id, key);
+              if (value != null) {
+                profileRaw = { ...(profileRaw || {}), [key]: value };
+              }
+            } catch {
+              // ignore missing extended keys
+            }
           }
+          if (!bannerMxc) bannerMxc = this.bannerMxcFromProfile(profileRaw);
         }
       }
     } catch {
@@ -529,20 +536,11 @@ class MatrixSession {
     const dmRoomId = this.findDirectRoomId(id);
     const isSelf = id === this.client.getUserId();
 
-    let bannerUrl = null;
-    if (bannerMxc && typeof bannerMxc === 'string' && bannerMxc.startsWith('mxc://')) {
-      try {
-        const remote =
-          this.client.mxcUrlToHttp(bannerMxc, 1280, 480, 'scale', false, true, true) ||
-          this.client.mxcUrlToHttp(bannerMxc, undefined, undefined, undefined, false, true, true) ||
-          null;
-        if (remote) bannerUrl = `/api/media?url=${encodeURIComponent(remote)}`;
-      } catch {
-        bannerUrl = null;
-      }
-    }
+    let bannerUrl = this.httpBannerUrl(bannerMxc);
 
-    const profileStyle = this.cacheProfileStyle(id, this.parseProfileStyle(profileRaw));
+    // MSC4522 / Paarrot 4.11+: prefer Matrix profile colors; avatar tEXt is legacy fallback.
+    const accountStyle = this.parseProfileStyle(profileRaw);
+    const roomColorPref = room ? this.getMemberColorPreference(room, id) : null;
     let paarrotColors = null;
     try {
       paarrotColors = await this.fetchAvatarPaarrotColors(id);
@@ -550,62 +548,23 @@ class MatrixSession {
       paarrotColors = null;
     }
 
-    // Prefer avatar-embedded Paarrot colors; Matrix profile style is fallback only.
-    const style = profileStyle || (paarrotColors
-      ? {
-          avatarBorder: paarrotColors.avatarBorderColor || null,
-          gradientStart: paarrotColors.gradient?.startColor || null,
-          gradientEnd: paarrotColors.gradient?.stopColor || null,
-          gradientAngle: (() => {
-            const dir = String(paarrotColors.gradient?.direction || '');
-            const m = dir.match(/(-?\d+(?:\.\d+)?)\s*deg/i);
-            return m ? Number(m[1]) : 180;
-          })(),
-          nameplate: null,
-          nameGradientStart: null,
-          nameGradientEnd: null,
-          color: paarrotColors.color || null,
-        }
-      : null);
+    const style = this.mergeProfileStyles({
+      roomColorPref,
+      accountStyle,
+      avatarMeta: paarrotColors,
+    });
+    this.cacheProfileStyle(id, style);
 
-    if (style && paarrotColors?.color) style.color = paarrotColors.color;
+    if (!bannerUrl && paarrotColors?.banner?.startsWith?.('mxc://')) {
+      bannerUrl = this.httpBannerUrl(paarrotColors.banner);
+    }
 
     return {
       userId: id,
       displayName: displayName || id.slice(1).split(':')[0] || id,
       avatarUrl: this.getLocalProfileAvatarPath(id, 128),
       hasAvatar: Boolean(avatarMxc || this.getProfileAvatarRemoteUrl(id, 128)),
-      bannerUrl:
-        bannerUrl ||
-        (paarrotColors?.banner?.startsWith('mxc://')
-          ? (() => {
-              try {
-                const remote =
-                  this.client.mxcUrlToHttp(
-                    paarrotColors.banner,
-                    1280,
-                    480,
-                    'scale',
-                    false,
-                    true,
-                    true,
-                  ) ||
-                  this.client.mxcUrlToHttp(
-                    paarrotColors.banner,
-                    undefined,
-                    undefined,
-                    undefined,
-                    false,
-                    true,
-                    true,
-                  ) ||
-                  null;
-                return remote ? `/api/media?url=${encodeURIComponent(remote)}` : null;
-              } catch {
-                return null;
-              }
-            })()
-          : null),
+      bannerUrl,
       presence,
       online: presence === 'online',
       statusMsg,
@@ -617,8 +576,168 @@ class MatrixSession {
       isSelf,
       roomId: roomId || null,
       style,
+      colorPreference: style?.colorPreference || null,
       paarrotColors,
     };
+  }
+
+  bannerMxcFromProfile(profileRaw) {
+    if (!profileRaw || typeof profileRaw !== 'object') return null;
+    const raw =
+      profileRaw[PaarrotProfile.BannerUrl] ||
+      profileRaw['chat.commet.profile_banner'] ||
+      profileRaw.banner_url ||
+      null;
+    if (typeof raw === 'string' && raw.startsWith('mxc://')) return raw;
+    if (raw && typeof raw === 'object' && typeof raw.url === 'string' && raw.url.startsWith('mxc://')) {
+      return raw.url;
+    }
+    return null;
+  }
+
+  httpBannerUrl(bannerMxc) {
+    if (!this.client || typeof bannerMxc !== 'string' || !bannerMxc.startsWith('mxc://')) {
+      return null;
+    }
+    try {
+      const remote =
+        this.client.mxcUrlToHttp(bannerMxc, 1280, 480, 'scale', false, true, true) ||
+        this.client.mxcUrlToHttp(bannerMxc, undefined, undefined, undefined, false, true, true) ||
+        null;
+      return remote ? `/api/media?url=${encodeURIComponent(remote)}` : null;
+    } catch {
+      return null;
+    }
+  }
+
+  normalizeHexColor(value) {
+    const raw = String(value || '').trim();
+    if (/^#[0-9a-fA-F]{3}$/.test(raw)) {
+      return `#${raw[1]}${raw[1]}${raw[2]}${raw[2]}${raw[3]}${raw[3]}`.toLowerCase();
+    }
+    if (/^#[0-9a-fA-F]{6}$/.test(raw)) return raw.toLowerCase();
+    return null;
+  }
+
+  normalizeColorPreference(raw) {
+    if (!raw) return null;
+    let parsed = raw;
+    if (typeof raw === 'string') {
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        const hex = this.normalizeHexColor(raw);
+        return hex ? { on_dark: hex, on_light: hex } : null;
+      }
+    }
+    if (!parsed || typeof parsed !== 'object') return null;
+    const onDark =
+      this.normalizeHexColor(parsed.on_dark) ||
+      this.normalizeHexColor(parsed.onDark) ||
+      this.normalizeHexColor(parsed.dark) ||
+      this.normalizeHexColor(parsed.color);
+    const onLight =
+      this.normalizeHexColor(parsed.on_light) ||
+      this.normalizeHexColor(parsed.onLight) ||
+      this.normalizeHexColor(parsed.light) ||
+      this.normalizeHexColor(parsed.color);
+    if (!onDark && !onLight) return null;
+    return {
+      on_dark: onDark || onLight,
+      on_light: onLight || onDark,
+    };
+  }
+
+  colorPreferenceFromSources(...sources) {
+    for (const source of sources) {
+      const pref = this.normalizeColorPreference(source);
+      if (pref) return pref;
+    }
+    return null;
+  }
+
+  getMemberColorPreference(room, userId) {
+    if (!room || !userId) return null;
+    try {
+      const member = room.getMember?.(userId);
+      const content = member?.events?.member?.getContent?.() || member?.event?.content || null;
+      if (!content || typeof content !== 'object') return null;
+      return this.colorPreferenceFromSources(
+        content[PaarrotProfile.ColorPreference],
+        content[PaarrotProfile.ColorPreferenceUnstable],
+        content[PaarrotProfile.Colors],
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  styleFromPaarrotAvatarMeta(meta) {
+    if (!meta) return null;
+    const dir = String(meta.gradient?.direction || '');
+    const m = dir.match(/(-?\d+(?:\.\d+)?)\s*deg/i);
+    const color = this.normalizeHexColor(meta.color);
+    return {
+      avatarBorder: meta.avatarBorderColor || null,
+      gradientStart: meta.gradient?.startColor || null,
+      gradientEnd: meta.gradient?.stopColor || null,
+      gradientAngle: m ? Number(m[1]) : 180,
+      nameplate: null,
+      nameGradientStart: null,
+      nameGradientEnd: null,
+      color,
+      colorPreference: color ? { on_dark: color, on_light: color } : null,
+    };
+  }
+
+  mergeProfileStyles({ roomColorPref = null, accountStyle = null, avatarMeta = null } = {}) {
+    const avatarStyle = this.styleFromPaarrotAvatarMeta(avatarMeta);
+    const base = {
+      avatarBorder: accountStyle?.avatarBorder || avatarStyle?.avatarBorder || null,
+      gradientStart: accountStyle?.gradientStart || avatarStyle?.gradientStart || null,
+      gradientEnd: accountStyle?.gradientEnd || avatarStyle?.gradientEnd || null,
+      gradientAngle:
+        accountStyle?.gradientAngle ??
+        avatarStyle?.gradientAngle ??
+        180,
+      nameplate: accountStyle?.nameplate || null,
+      nameGradientStart: accountStyle?.nameGradientStart || null,
+      nameGradientEnd: accountStyle?.nameGradientEnd || null,
+      color: null,
+      colorPreference: null,
+    };
+
+    // MSC4522 precedence: per-room → account profile → avatar-embedded legacy.
+    const colorPreference =
+      this.normalizeColorPreference(roomColorPref) ||
+      accountStyle?.colorPreference ||
+      this.normalizeColorPreference(accountStyle?.color) ||
+      (accountStyle?.nameGradientStart
+        ? {
+            on_dark: this.normalizeHexColor(accountStyle.nameGradientStart),
+            on_light: this.normalizeHexColor(
+              accountStyle.nameGradientEnd || accountStyle.nameGradientStart,
+            ),
+          }
+        : null) ||
+      avatarStyle?.colorPreference ||
+      null;
+
+    if (colorPreference?.on_dark || colorPreference?.on_light) {
+      base.colorPreference = {
+        on_dark: colorPreference.on_dark || colorPreference.on_light,
+        on_light: colorPreference.on_light || colorPreference.on_dark,
+      };
+      // Default solid for callers that don't pick a theme yet.
+      base.color = base.colorPreference.on_dark;
+      if (!base.nameGradientStart) base.nameGradientStart = base.colorPreference.on_dark;
+      if (!base.nameGradientEnd) base.nameGradientEnd = base.colorPreference.on_light;
+    }
+
+    if (!base.avatarBorder && !base.gradientStart && !base.color && !base.nameplate) {
+      return null;
+    }
+    return base;
   }
 
   async getAccountEmails() {
@@ -660,6 +779,21 @@ class MatrixSession {
         : typeof parsed.colors?.end === 'string'
           ? parsed.colors.end
           : null;
+    const colorPreference =
+      this.normalizeColorPreference(parsed.colorPreference) ||
+      this.normalizeColorPreference(parsed[PaarrotProfile.ColorPreference]) ||
+      this.normalizeColorPreference(parsed[PaarrotProfile.ColorPreferenceUnstable]) ||
+      this.normalizeColorPreference({
+        on_dark: parsed.on_dark || parsed.onDark,
+        on_light: parsed.on_light || parsed.onLight,
+      }) ||
+      this.normalizeColorPreference(parsed.color) ||
+      (nameGradientStart
+        ? {
+            on_dark: this.normalizeHexColor(nameGradientStart),
+            on_light: this.normalizeHexColor(nameGradientEnd || nameGradientStart),
+          }
+        : null);
     return {
       avatarBorder: typeof parsed.avatarBorder === 'string' ? parsed.avatarBorder : null,
       gradientStart: typeof parsed.gradientStart === 'string' ? parsed.gradientStart : null,
@@ -670,22 +804,56 @@ class MatrixSession {
       nameplate,
       nameGradientStart,
       nameGradientEnd,
+      color: colorPreference?.on_dark || this.normalizeHexColor(parsed.color) || null,
+      colorPreference,
     };
   }
 
   parseProfileStyle(profileRaw) {
+    if (!profileRaw || typeof profileRaw !== 'object') return null;
+
+    const colorPreference = this.colorPreferenceFromSources(
+      profileRaw[PaarrotProfile.ColorPreference],
+      profileRaw[PaarrotProfile.ColorPreferenceUnstable],
+      profileRaw[PaarrotProfile.Colors],
+    );
+
     const raw =
-      profileRaw?.['paarrot.colors'] ||
-      profileRaw?.['app.relay.profile_style'] ||
-      profileRaw?.['im.vector.custom.relay_profile_style'] ||
+      profileRaw[PaarrotProfile.Colors] ||
+      profileRaw['app.relay.profile_style'] ||
+      profileRaw['im.vector.custom.relay_profile_style'] ||
       null;
-    if (!raw) return null;
-    try {
-      const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-      return this.normalizeProfileStyle(parsed);
-    } catch {
-      return null;
+
+    let style = null;
+    if (raw) {
+      try {
+        const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        style = this.normalizeProfileStyle(parsed);
+      } catch {
+        style = null;
+      }
     }
+
+    if (!style && colorPreference) {
+      style = this.normalizeProfileStyle({ colorPreference });
+    } else if (style && colorPreference && !style.colorPreference) {
+      style = {
+        ...style,
+        colorPreference,
+        color: colorPreference.on_dark || style.color,
+      };
+    } else if (style && colorPreference) {
+      // MSC4522 profile field wins over nested blob colors when both exist.
+      style = {
+        ...style,
+        colorPreference,
+        color: colorPreference.on_dark || style.color,
+        nameGradientStart: style.nameGradientStart || colorPreference.on_dark,
+        nameGradientEnd: style.nameGradientEnd || colorPreference.on_light,
+      };
+    }
+
+    return style;
   }
 
   cacheProfileStyle(userId, style) {
@@ -702,6 +870,13 @@ class MatrixSession {
 
   async setProfileStyle(style) {
     if (!this.client) throw new Error('Not logged in');
+    const colorPreference =
+      this.normalizeColorPreference(style?.colorPreference) ||
+      this.normalizeColorPreference({
+        on_dark: style?.nameGradientStart || style?.color,
+        on_light: style?.nameGradientEnd || style?.nameGradientStart || style?.color,
+      });
+
     const payload = style
       ? {
           avatarBorder: style.avatarBorder || null,
@@ -709,13 +884,15 @@ class MatrixSession {
           gradientEnd: style.gradientEnd || null,
           gradientAngle: Number(style.gradientAngle) || 180,
           nameplate: style.nameplate || null,
-          nameGradientStart: style.nameGradientStart || null,
-          nameGradientEnd: style.nameGradientEnd || null,
+          nameGradientStart: style.nameGradientStart || colorPreference?.on_dark || null,
+          nameGradientEnd: style.nameGradientEnd || colorPreference?.on_light || null,
+          color: colorPreference?.on_dark || style.color || null,
+          colorPreference,
           colors:
-            style.nameGradientStart || style.nameGradientEnd
+            style.nameGradientStart || style.nameGradientEnd || colorPreference
               ? {
-                  start: style.nameGradientStart || null,
-                  end: style.nameGradientEnd || null,
+                  start: style.nameGradientStart || colorPreference?.on_dark || null,
+                  end: style.nameGradientEnd || colorPreference?.on_light || null,
                 }
               : null,
         }
@@ -723,12 +900,28 @@ class MatrixSession {
 
     const value = payload ? JSON.stringify(payload) : '';
     const userId = this.client.getUserId?.();
+    const colorPrefValue = colorPreference || null;
+
     try {
       if (payload && typeof this.client.setExtendedProfileProperty === 'function') {
         const supported = await this.client.doesServerSupportExtendedProfiles?.();
         if (supported) {
-          await this.client.setExtendedProfileProperty('paarrot.colors', value);
+          await this.client.setExtendedProfileProperty(PaarrotProfile.Colors, value);
           await this.client.setExtendedProfileProperty('app.relay.profile_style', value);
+          if (colorPrefValue) {
+            await this.client.setExtendedProfileProperty(
+              PaarrotProfile.ColorPreference,
+              colorPrefValue,
+            );
+            try {
+              await this.client.setExtendedProfileProperty(
+                PaarrotProfile.ColorPreferenceUnstable,
+                colorPrefValue,
+              );
+            } catch {
+              // optional unstable key
+            }
+          }
           this.cacheProfileStyle(userId, payload);
           return { ok: true, style: payload, via: 'extended' };
         }
@@ -738,9 +931,14 @@ class MatrixSession {
     }
 
     if (!payload) {
-      for (const key of ['paarrot.colors', 'app.relay.profile_style']) {
+      for (const key of [
+        PaarrotProfile.Colors,
+        'app.relay.profile_style',
+        PaarrotProfile.ColorPreference,
+        PaarrotProfile.ColorPreferenceUnstable,
+      ]) {
         try {
-          await this.client.setProfileInfo(key, { [key]: '' });
+          await this.client.setProfileInfo(key, { [key]: key.includes('color') ? null : '' });
         } catch {
           // ignore delete failures
         }
@@ -750,9 +948,20 @@ class MatrixSession {
     }
 
     try {
-      await this.client.setProfileInfo('paarrot.colors', { 'paarrot.colors': value });
+      await this.client.setProfileInfo(PaarrotProfile.Colors, {
+        [PaarrotProfile.Colors]: value,
+      });
     } catch {
       // optional key — Relay style still saved below
+    }
+    try {
+      if (colorPrefValue) {
+        await this.client.setProfileInfo(PaarrotProfile.ColorPreference, {
+          [PaarrotProfile.ColorPreference]: colorPrefValue,
+        });
+      }
+    } catch {
+      // optional MSC4522 key
     }
     await this.client.setProfileInfo('app.relay.profile_style', {
       'app.relay.profile_style': value,
@@ -1397,6 +1606,20 @@ class MatrixSession {
           roomId: member.roomId,
           userId: member.userId || null,
           typing: Boolean(member.typing),
+          live: true,
+        });
+      });
+    }
+
+    if (sdk.UserEvent?.Presence) {
+      client.on(sdk.UserEvent.Presence, (_event, user) => {
+        if (!this.ready || !user?.userId) return;
+        const presence = user.presence || 'offline';
+        this.publishLive({
+          kind: 'presence',
+          userId: user.userId,
+          presence,
+          online: presence === 'online',
           live: true,
         });
       });
@@ -2791,6 +3014,79 @@ class MatrixSession {
   }
 
   /**
+   * Joined rooms that can be linked into a space (not already a direct child).
+   * Excludes DMs and the parent space itself; includes other spaces as subspaces.
+   */
+  listAddableRoomsForSpace(spaceId) {
+    if (!this.client) return [];
+    const parentId = String(spaceId || '').trim();
+    if (!parentId.startsWith('!')) return [];
+    const parent = this.client.getRoom(parentId);
+    if (!parent || !this.isSpaceLikeRoom(parent)) return [];
+    const childIds = this.getSpaceChildIds(parent);
+    const directIds = this.getDirectRoomIdSet();
+
+    return (this.client.getRooms() || [])
+      .filter((room) => {
+        if (!this.isJoinedRoom(room)) return false;
+        if (room.roomId === parentId) return false;
+        if (childIds.has(room.roomId)) return false;
+        if (directIds.has(room.roomId) || this.isDirectRoom(room)) return false;
+        return true;
+      })
+      .map((room) => ({
+        ...this.serializeRoom(room, { isDirect: false }),
+        isSpace: this.isSpaceLikeRoom(room),
+      }))
+      .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+  }
+
+  async addExistingRoomToSpace(spaceId, roomId) {
+    if (!this.client) throw new Error('Not logged in');
+    const parentId = String(spaceId || '').trim();
+    const childId = String(roomId || '').trim();
+    if (!parentId.startsWith('!') || !childId.startsWith('!')) {
+      throw new Error('Space and room id are required');
+    }
+    if (parentId === childId) throw new Error('A space cannot contain itself');
+    const parent = this.client.getRoom(parentId);
+    if (!parent || !this.isSpaceLikeRoom(parent)) throw new Error('Space not found');
+    if (!this.isJoinedRoom(parent)) throw new Error('Join the space first');
+    const child = this.client.getRoom(childId);
+    if (!child) throw new Error('Room not found');
+    if (!this.isJoinedRoom(child)) throw new Error('Join the room before adding it to this space');
+    if (this.isDirectRoom(child)) throw new Error('Direct messages cannot be added to a space');
+    if (this.getSpaceChildIds(parent).has(childId)) {
+      return {
+        ok: true,
+        parentSpaceId: parentId,
+        roomId: childId,
+        alreadyLinked: true,
+        summary: this.isSpaceLikeRoom(child)
+          ? this.getSpaceSummary(childId)
+          : this.getRoomSummary(childId),
+      };
+    }
+
+    const entries = this.getSpaceChildEntries(parent);
+    const lastOrder =
+      entries.length > 0
+        ? this.getSpaceChildStateContent(parentId, entries[entries.length - 1].roomId)?.order || null
+        : null;
+    const order = this.orderKeyBetween(lastOrder, null);
+    await this.setSpaceChild(parentId, childId, { order });
+    return {
+      ok: true,
+      parentSpaceId: parentId,
+      roomId: childId,
+      isSpace: this.isSpaceLikeRoom(child),
+      summary: this.isSpaceLikeRoom(child)
+        ? this.getSpaceSummary(childId)
+        : this.getRoomSummary(childId),
+    };
+  }
+
+  /**
    * Rewrite m.space.child `order` for ids in orderedChildIds (only sends events that changed).
    */
   async reorderSpaceChildren(parentSpaceId, orderedChildIds = []) {
@@ -3686,7 +3982,7 @@ class MatrixSession {
   }
 
   findSpaceFilterForRoom(roomId) {
-    if (!this.client || !roomId) return 'home';
+    if (!this.client || !roomId) return 'dms';
     const room = this.client.getRoom(roomId);
 
     const collectSidebarRoomIds = (spaceId) => {
@@ -3721,8 +4017,8 @@ class MatrixSession {
     }
 
     if (room && this.isDmSidebarRoom(room)) return 'dms';
-    if (room && this.isHomeSidebarRoom(room)) return 'home';
-    return 'home';
+    if (room && this.isHomeSidebarRoom(room)) return 'dms';
+    return 'dms';
   }
 
   getInviteInviter(room) {
@@ -4346,7 +4642,11 @@ class MatrixSession {
     const room = this.client.getRoom(roomId);
     if (!room || this.isSpaceRoom(room)) return null;
     const directIds = this.getDirectRoomIdSet();
-    return this.serializeRoom(room, { isDirect: directIds.has(room.roomId) });
+    const summary = this.serializeRoom(room, { isDirect: directIds.has(room.roomId) });
+    return {
+      ...summary,
+      spaceFilter: this.findSpaceFilterForRoom(roomId),
+    };
   }
 
   getPinnedEventIds(room) {
@@ -5264,12 +5564,12 @@ class MatrixSession {
         if (!this.isJoinedRoom(room)) return false;
         if (this.isSpaceLikeRoom(room)) return false;
 
-        if (filter === 'dms') {
-          return this.isDmSidebarRoom(room, spaceOrganizedIds);
-        }
-
-        if (filter === 'home') {
-          return this.isHomeSidebarRoom(room, spaceOrganizedIds);
+        if (filter === 'dms' || filter === 'home') {
+          // Kitsu home (Direct Messages): DMs + orphan rooms not under a joined space.
+          return (
+            this.isDmSidebarRoom(room, spaceOrganizedIds) ||
+            this.isHomeSidebarRoom(room, spaceOrganizedIds)
+          );
         }
 
         if (selectedChildIds) {
@@ -5281,7 +5581,7 @@ class MatrixSession {
       })
       .map((room) =>
         this.serializeRoom(room, {
-          isDirect: filter === 'dms' ? true : this.isDirectRoom(room),
+          isDirect: this.isDirectRoom(room),
         }),
       )
       .sort((a, b) => {

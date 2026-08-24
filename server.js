@@ -323,6 +323,27 @@ app.post('/api/spaces/:spaceId/children', async (req, res) => {
   }
 });
 
+app.get('/api/spaces/:spaceId/addable-rooms', (req, res) => {
+  if (!matrix.client) {
+    res.status(401).json({ error: 'Not logged in' });
+    return;
+  }
+  try {
+    res.json({ rooms: matrix.listAddableRoomsForSpace(req.params.spaceId) });
+  } catch (error) {
+    res.status(400).json({ error: error?.message || String(error) });
+  }
+});
+
+app.post('/api/spaces/:spaceId/children/link', async (req, res) => {
+  try {
+    const result = await matrix.addExistingRoomToSpace(req.params.spaceId, req.body?.roomId);
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ error: error?.message || String(error) });
+  }
+});
+
 app.get('/api/spaces/:spaceId/forum', (req, res) => {
   if (!matrix.client) {
     res.status(401).json({ error: 'Not logged in' });
@@ -846,7 +867,7 @@ app.get('/api/rooms', (_req, res) => {
     res.status(401).json({ error: 'Not logged in' });
     return;
   }
-  const filter = String(_req.query.space || _req.query.filter || 'home').trim() || 'home';
+  const filter = String(_req.query.space || _req.query.filter || 'dms').trim() || 'dms';
   const payload = {
     rooms: matrix.listRooms({ filter }),
     filter,

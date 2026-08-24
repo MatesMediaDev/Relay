@@ -36,6 +36,8 @@
   --accent-line: rgba(88, 101, 242, 0.45);
   --focus-ring: rgba(88, 101, 242, 0.42);
   --rail-active-fill: rgba(88, 101, 242, 0.18);
+  --message-hover-bg: #2e3035;
+  --composer-bg: #383a40;
 }
 
 [data-theme='midnight'] {
@@ -71,6 +73,8 @@
   --accent-line: rgba(99, 102, 241, 0.45);
   --focus-ring: rgba(129, 140, 248, 0.4);
   --rail-active-fill: rgba(99, 102, 241, 0.16);
+  --message-hover-bg: #0f172a;
+  --composer-bg: #1e293b;
 }
 
 [data-theme='light'] {
@@ -106,4 +110,6 @@
   --accent-line: rgba(88, 101, 242, 0.4);
   --focus-ring: rgba(88, 101, 242, 0.35);
   --rail-active-fill: rgba(88, 101, 242, 0.14);
+  --message-hover-bg: #e3e5ea;
+  --composer-bg: #ffffff;
 }

@@ -1,0 +1,36 @@
+{
+  "entries": {
+    "0.3.16": {
+      "date": "2026-08-23",
+      "title": "Profile polish, home layout & updates",
+      "sections": [
+        {
+          "heading": "Username colors (MSC4522)",
+          "body": "Pick how your name looks on dark and light themes. Colors are saved to your Matrix profile as m.color_preference so other MSC4522 clients can see them.",
+          "bullets": [
+            "Separate dark/light theme previews with compact color pickers",
+            "Save or remove username colors independently of avatar styling"
+          ]
+        },
+        {
+          "heading": "Home & spaces",
+          "body": "The Kitsu tab is now your home — direct messages and orphan rooms live together.",
+          "bullets": [
+            "Direct Messages and Rooms sections on the home tab",
+            "Add existing rooms to a space from the context menu",
+            "Spaces keep their own sidebars on the workspace rail"
+          ]
+        },
+        {
+          "heading": "Desktop updates",
+          "body": "Kitsu can now check GitHub Releases for new AppImage and Windows builds.",
+          "bullets": [
+            "Automatic update checks in the desktop app",
+            "What's new changelog when you launch a new version",
+            "CI builds Linux AppImage and Windows installer on every release tag"
+          ]
+        }
+      ]
+    }
+  }
+}

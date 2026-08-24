@@ -12,6 +12,12 @@ const {
   MenuItem,
 } = require('electron');
 const { startServer, stopServer } = require('../server');
+const {
+  initAutoUpdater,
+  checkForUpdates,
+  installUpdate,
+  getUpdateStatus,
+} = require('./updater');
 
 const PROTOCOL = 'kitsu';
 
@@ -492,6 +498,10 @@ ipcMain.handle('relay:clear-notifications', (_event, payload = {}) => {
   return { ok: true };
 });
 
+ipcMain.handle('relay:check-for-updates', async () => checkForUpdates());
+ipcMain.handle('relay:install-update', () => installUpdate());
+ipcMain.handle('relay:get-update-status', () => getUpdateStatus());
+
 app.whenReady().then(async () => {
   const readyAt = Date.now();
   app.setName('Kitsu');
@@ -504,8 +514,7 @@ app.whenReady().then(async () => {
   const pluginsDir = path.join(app.getPath('userData'), 'plugins');
 
   const backend = await startServer({
-    // LAN bind so the Android companion can reach this PC on Wi‑Fi.
-    // Window still loads via loopback below.
+    // Bind all interfaces by default; window still loads via loopback below.
     host: process.env.RELAY_HOST || process.env.KITSU_HOST || '0.0.0.0',
     // Stable port keeps renderer localStorage origin consistent across relaunches.
     // Falls back automatically if busy (see startServer).
@@ -515,12 +524,14 @@ app.whenReady().then(async () => {
   });
 
   appUrl = `http://127.0.0.1:${backend.port}`;
-  console.log(
-    `[kitsu] mobile companion: http://<pc-lan-ip>:${backend.port} (bound ${backend.host})`,
-  );
+  console.log(`[kitsu] listening on ${backend.host}:${backend.port}`);
   configureSpellChecker(true);
   createWindow();
   console.log(`[relay] window opened (+${Date.now() - readyAt}ms after app ready)`);
+  if (mainWindow) {
+    const updater = initAutoUpdater(mainWindow);
+    if (updater?.enabled) console.log('[kitsu] auto-updater enabled');
+  }
 
   // Non-critical startup work after first paint path is unblocked.
   setImmediate(() => {

@@ -36,4 +36,14 @@ contextBridge.exposeInMainWorld('relayDesktop', {
     ipcRenderer.on('relay:protocol-open', handler);
     return () => ipcRenderer.removeListener('relay:protocol-open', handler);
   },
+  checkForUpdates: () => ipcRenderer.invoke('relay:check-for-updates'),
+  installUpdate: () => ipcRenderer.invoke('relay:install-update'),
+  getUpdateStatus: () => ipcRenderer.invoke('relay:get-update-status'),
+  onUpdateStatus: (callback) => {
+    const handler = (_event, data) => {
+      if (typeof callback === 'function') callback(data);
+    };
+    ipcRenderer.on('relay:update-status', handler);
+    return () => ipcRenderer.removeListener('relay:update-status', handler);
+  },
 });

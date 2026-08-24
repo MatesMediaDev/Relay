@@ -28,8 +28,14 @@ const RoomType = {
 };
 
 const Profile = {
+  /** Paarrot-extended profile style blob (gradients, nameplate, etc.). */
   Colors: 'paarrot.colors',
+  /** MSC4133 profile banner. */
   BannerUrl: 'm.banner_url',
+  /** MSC4522 username colors (stable). */
+  ColorPreference: 'm.color_preference',
+  /** MSC4522 unstable prefix while the MSC is open. */
+  ColorPreferenceUnstable: 'eu.she-a.color',
 };
 
 const Carousel = {

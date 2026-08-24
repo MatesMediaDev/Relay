@@ -272,6 +272,41 @@
     return extractPaarrotColorLoose(bytes);
   }
 
+  function normalizeHexColor(value) {
+    const raw = String(value || '').trim();
+    if (/^#[0-9a-fA-F]{3}$/.test(raw)) {
+      return `#${raw[1]}${raw[1]}${raw[2]}${raw[2]}${raw[3]}${raw[3]}`.toLowerCase();
+    }
+    if (/^#[0-9a-fA-F]{6}$/.test(raw)) return raw.toLowerCase();
+    return null;
+  }
+
+  function normalizeColorPreference(raw) {
+    if (!raw) return null;
+    let parsed = raw;
+    if (typeof raw === 'string') {
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        const hex = normalizeHexColor(raw);
+        return hex ? { on_dark: hex, on_light: hex } : null;
+      }
+    }
+    if (!parsed || typeof parsed !== 'object') return null;
+    const onDark =
+      normalizeHexColor(parsed.on_dark) ||
+      normalizeHexColor(parsed.onDark) ||
+      normalizeHexColor(parsed.dark) ||
+      normalizeHexColor(parsed.color);
+    const onLight =
+      normalizeHexColor(parsed.on_light) ||
+      normalizeHexColor(parsed.onLight) ||
+      normalizeHexColor(parsed.light) ||
+      normalizeHexColor(parsed.color);
+    if (!onDark && !onLight) return null;
+    return { on_dark: onDark || onLight, on_light: onLight || onDark };
+  }
+
   function normalizeProfileStyle(parsed) {
     if (!parsed || typeof parsed !== 'object') return null;
     const nameplate = typeof parsed.nameplate === 'string' ? parsed.nameplate : null;
@@ -287,6 +322,21 @@
         : typeof parsed.colors?.end === 'string'
           ? parsed.colors.end
           : null;
+    const colorPreference =
+      normalizeColorPreference(parsed.colorPreference) ||
+      normalizeColorPreference(parsed['m.color_preference']) ||
+      normalizeColorPreference(parsed['eu.she-a.color']) ||
+      normalizeColorPreference({
+        on_dark: parsed.on_dark || parsed.onDark,
+        on_light: parsed.on_light || parsed.onLight,
+      }) ||
+      normalizeColorPreference(parsed.color) ||
+      (nameGradientStart
+        ? {
+            on_dark: normalizeHexColor(nameGradientStart),
+            on_light: normalizeHexColor(nameGradientEnd || nameGradientStart),
+          }
+        : null);
     return {
       avatarBorder: typeof parsed.avatarBorder === 'string' ? parsed.avatarBorder : null,
       gradientStart: typeof parsed.gradientStart === 'string' ? parsed.gradientStart : null,
@@ -295,23 +345,44 @@
       nameplate,
       nameGradientStart,
       nameGradientEnd,
-      color: typeof parsed.color === 'string' ? parsed.color : null,
+      color: colorPreference?.on_dark || normalizeHexColor(parsed.color) || null,
+      colorPreference,
     };
   }
 
   function parseProfileStyle(profileRaw) {
+    if (!profileRaw || typeof profileRaw !== 'object') return null;
+    const colorPreference =
+      normalizeColorPreference(profileRaw['m.color_preference']) ||
+      normalizeColorPreference(profileRaw['eu.she-a.color']) ||
+      normalizeColorPreference(profileRaw['paarrot.colors']);
+
     const raw =
       profileRaw?.['paarrot.colors'] ||
       profileRaw?.['app.relay.profile_style'] ||
       profileRaw?.['im.vector.custom.relay_profile_style'] ||
       null;
-    if (!raw) return null;
-    try {
-      const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-      return normalizeProfileStyle(parsed);
-    } catch {
-      return null;
+
+    let style = null;
+    if (raw) {
+      try {
+        const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        style = normalizeProfileStyle(parsed);
+      } catch {
+        style = null;
+      }
     }
+    if (!style && colorPreference) style = normalizeProfileStyle({ colorPreference });
+    else if (style && colorPreference) {
+      style = {
+        ...style,
+        colorPreference,
+        color: colorPreference.on_dark || style.color,
+        nameGradientStart: style.nameGradientStart || colorPreference.on_dark,
+        nameGradientEnd: style.nameGradientEnd || colorPreference.on_light,
+      };
+    }
+    return style;
   }
 
   function cacheProfileStyle(userId, style) {
@@ -324,6 +395,7 @@
     if (!meta) return null;
     const dir = String(meta.gradient?.direction || '');
     const m = dir.match(/(-?\d+(?:\.\d+)?)\s*deg/i);
+    const color = normalizeHexColor(meta.color);
     return {
       avatarBorder: meta.avatarBorderColor || null,
       gradientStart: meta.gradient?.startColor || null,
@@ -332,8 +404,63 @@
       nameplate: null,
       nameGradientStart: null,
       nameGradientEnd: null,
-      color: meta.color || null,
+      color,
+      colorPreference: color ? { on_dark: color, on_light: color } : null,
     };
+  }
+
+  function getMemberColorPreference(room, userId) {
+    if (!room || !userId) return null;
+    try {
+      const member = room.getMember?.(userId);
+      const content = member?.events?.member?.getContent?.() || member?.event?.content || null;
+      if (!content || typeof content !== 'object') return null;
+      return (
+        normalizeColorPreference(content['m.color_preference']) ||
+        normalizeColorPreference(content['eu.she-a.color']) ||
+        normalizeColorPreference(content['paarrot.colors'])
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  function mergeProfileStyles({ roomColorPref = null, accountStyle = null, avatarMeta = null } = {}) {
+    const avatarStyle = styleFromPaarrot(avatarMeta);
+    const base = {
+      avatarBorder: accountStyle?.avatarBorder || avatarStyle?.avatarBorder || null,
+      gradientStart: accountStyle?.gradientStart || avatarStyle?.gradientStart || null,
+      gradientEnd: accountStyle?.gradientEnd || avatarStyle?.gradientEnd || null,
+      gradientAngle: accountStyle?.gradientAngle ?? avatarStyle?.gradientAngle ?? 180,
+      nameplate: accountStyle?.nameplate || null,
+      nameGradientStart: accountStyle?.nameGradientStart || null,
+      nameGradientEnd: accountStyle?.nameGradientEnd || null,
+      color: null,
+      colorPreference: null,
+    };
+    const colorPreference =
+      normalizeColorPreference(roomColorPref) ||
+      accountStyle?.colorPreference ||
+      normalizeColorPreference(accountStyle?.color) ||
+      (accountStyle?.nameGradientStart
+        ? {
+            on_dark: normalizeHexColor(accountStyle.nameGradientStart),
+            on_light: normalizeHexColor(accountStyle.nameGradientEnd || accountStyle.nameGradientStart),
+          }
+        : null) ||
+      avatarStyle?.colorPreference ||
+      null;
+    if (colorPreference?.on_dark || colorPreference?.on_light) {
+      base.colorPreference = {
+        on_dark: colorPreference.on_dark || colorPreference.on_light,
+        on_light: colorPreference.on_light || colorPreference.on_dark,
+      };
+      base.color = base.colorPreference.on_dark;
+      if (!base.nameGradientStart) base.nameGradientStart = base.colorPreference.on_dark;
+      if (!base.nameGradientEnd) base.nameGradientEnd = base.colorPreference.on_light;
+    }
+    if (!base.avatarBorder && !base.gradientStart && !base.color && !base.nameplate) return null;
+    return base;
   }
 
   async function fetchAvatarBytes(userId, size = 96) {
@@ -405,10 +532,25 @@
       if (typeof client.getExtendedProfileProperty === 'function') {
         const supported = await client.doesServerSupportExtendedProfiles?.();
         if (supported) {
-          const styleValue = await client.getExtendedProfileProperty(id, 'app.relay.profile_style');
-          if (styleValue != null) profileRaw = { ...(profileRaw || {}), 'app.relay.profile_style': styleValue };
-          const paarrotValue = await client.getExtendedProfileProperty(id, 'paarrot.colors');
-          if (paarrotValue != null) profileRaw = { ...(profileRaw || {}), 'paarrot.colors': paarrotValue };
+          for (const key of [
+            'app.relay.profile_style',
+            'paarrot.colors',
+            'm.color_preference',
+            'eu.she-a.color',
+            'm.banner_url',
+          ]) {
+            try {
+              const value = await client.getExtendedProfileProperty(id, key);
+              if (value != null) profileRaw = { ...(profileRaw || {}), [key]: value };
+            } catch { /* ignore */ }
+          }
+          if (!bannerMxc) {
+            bannerMxc =
+              profileRaw?.['m.banner_url'] ||
+              profileRaw?.['chat.commet.profile_banner'] ||
+              profileRaw?.banner_url ||
+              null;
+          }
         }
       }
     } catch { /* ignore */ }
@@ -419,26 +561,24 @@
         mediaProxy(mxcToRemote(bannerMxc, 1280, 480, 'scale')) ||
         mxcToHttpFull(bannerMxc);
     }
-    const profileStyle = cacheProfileStyle(id, parseProfileStyle(profileRaw));
+    const accountStyle = parseProfileStyle(profileRaw);
+    const room = roomId ? client.getRoom(roomId) : null;
+    const roomColorPref = getMemberColorPreference(room, id);
     let paarrotColors = null;
     try { paarrotColors = await fetchAvatarPaarrotColors(id, avatarMxc); } catch { paarrotColors = null; }
+    // MSC4133 banner on profile first; avatar-embedded banner is legacy fallback.
     if (!bannerUrl && paarrotColors?.banner?.startsWith?.('mxc://')) {
       bannerUrl = mxcToHttpFull(paarrotColors.banner);
     } else if (!bannerUrl && typeof paarrotColors?.banner === 'string' && /^https?:/i.test(paarrotColors.banner)) {
       bannerUrl = mediaProxy(paarrotColors.banner);
     }
-    let style = profileStyle || styleFromPaarrot(paarrotColors);
-    if (style && paarrotColors?.color) style = { ...style, color: paarrotColors.color };
-    if (style && paarrotColors?.avatarBorderColor && !style.avatarBorder) {
-      style = { ...style, avatarBorder: paarrotColors.avatarBorderColor };
-    }
-    if (style && paarrotColors?.gradient) {
-      style = {
-        ...style,
-        gradientStart: style.gradientStart || paarrotColors.gradient.startColor || null,
-        gradientEnd: style.gradientEnd || paarrotColors.gradient.stopColor || null,
-      };
-    }
+    // MSC4522 / Paarrot 4.11+: profile colors beat avatar tEXt metadata.
+    const style = mergeProfileStyles({
+      roomColorPref,
+      accountStyle,
+      avatarMeta: paarrotColors,
+    });
+    cacheProfileStyle(id, style);
     return {
       userId: id,
       displayName,
@@ -446,6 +586,7 @@
       hasAvatar: Boolean(avatarMxc),
       bannerUrl,
       style,
+      colorPreference: style?.colorPreference || null,
       paarrotColors,
       presence: null,
       statusMsg: client.getUser?.(id)?.presenceStatusMsg || '',
@@ -1042,7 +1183,7 @@
     };
   }
 
-  function listRooms(filter = 'home') {
+  function listRooms(filter = 'dms') {
     if (!client) return [];
     const directIds = getDirectIds();
     if (filter && filter.startsWith('!')) {
@@ -1051,7 +1192,8 @@
     return (client.getRooms?.() || [])
       .filter((room) => {
         if (!isJoined(room) || isSpaceLikeRoom(room)) return false;
-        if (filter === 'dms') return directIds.has(room.roomId);
+        // dms/home: all joined non-space rooms (spaces keep their own sidebars).
+        if (filter === 'dms' || filter === 'home') return true;
         return true;
       })
       .map((room) => serializeRoom(room, { isDirect: directIds.has(room.roomId) }))
@@ -1878,6 +2020,12 @@
       if (!client) return errorResponse('Not logged in', 401);
       try {
         const style = body?.style === null ? null : normalizeProfileStyle(body?.style || body || {});
+        const colorPreference =
+          normalizeColorPreference(style?.colorPreference) ||
+          normalizeColorPreference({
+            on_dark: style?.nameGradientStart || style?.color,
+            on_light: style?.nameGradientEnd || style?.nameGradientStart || style?.color,
+          });
         const payload = style
           ? {
               avatarBorder: style.avatarBorder || null,
@@ -1885,11 +2033,16 @@
               gradientEnd: style.gradientEnd || null,
               gradientAngle: Number(style.gradientAngle) || 180,
               nameplate: style.nameplate || null,
-              nameGradientStart: style.nameGradientStart || null,
-              nameGradientEnd: style.nameGradientEnd || null,
+              nameGradientStart: style.nameGradientStart || colorPreference?.on_dark || null,
+              nameGradientEnd: style.nameGradientEnd || colorPreference?.on_light || null,
+              color: colorPreference?.on_dark || style.color || null,
+              colorPreference,
               colors:
-                style.nameGradientStart || style.nameGradientEnd
-                  ? { start: style.nameGradientStart || null, end: style.nameGradientEnd || null }
+                style.nameGradientStart || style.nameGradientEnd || colorPreference
+                  ? {
+                      start: style.nameGradientStart || colorPreference?.on_dark || null,
+                      end: style.nameGradientEnd || colorPreference?.on_light || null,
+                    }
                   : null,
             }
           : null;
@@ -1902,14 +2055,27 @@
             if (supported) {
               await client.setExtendedProfileProperty('paarrot.colors', value);
               await client.setExtendedProfileProperty('app.relay.profile_style', value);
+              if (colorPreference) {
+                await client.setExtendedProfileProperty('m.color_preference', colorPreference);
+              }
               via = 'extended';
             } else {
               await client.setProfileInfo('paarrot.colors', { 'paarrot.colors': value });
               await client.setProfileInfo('app.relay.profile_style', { 'app.relay.profile_style': value });
+              if (colorPreference) {
+                await client.setProfileInfo('m.color_preference', {
+                  'm.color_preference': colorPreference,
+                });
+              }
             }
           } else if (payload) {
             await client.setProfileInfo('paarrot.colors', { 'paarrot.colors': value });
             await client.setProfileInfo('app.relay.profile_style', { 'app.relay.profile_style': value });
+            if (colorPreference) {
+              await client.setProfileInfo('m.color_preference', {
+                'm.color_preference': colorPreference,
+              });
+            }
           }
         } catch (error) {
           return errorResponse(error?.message || error, 400);

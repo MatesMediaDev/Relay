@@ -132,7 +132,7 @@
 
   // Restore session UI as early as possible so a later boot error can't leave the login screen stuck.
   void (async function earlySessionRestore() {
-    for (let attempt = 0; attempt < 40; attempt += 1) {
+    for (let attempt = 0; attempt < 80; attempt += 1) {
       try {
         const res = await fetch('/api/session');
         const session = await res.json().catch(() => ({}));
@@ -151,6 +151,29 @@
         console.warn('[relay] early session restore wait', error?.message || error);
       }
       await new Promise((resolve) => setTimeout(resolve, attempt < 8 ? 50 : 120));
+    }
+  })();
+
+  // If we landed on login while the backend already has a session, hop into chat.
+  void (async function recoverStuckLogin() {
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      if (!loginView || loginView.hidden) return;
+      try {
+        const res = await fetch('/api/session');
+        const session = await res.json().catch(() => ({}));
+        if (session?.ready || (session?.connected && session?.restoring)) {
+          console.info('[relay] recovering stuck login → chat', session.userId || '');
+          if (typeof showChat === 'function') showChat(session);
+          else {
+            loginView.hidden = true;
+            if (chatView) chatView.hidden = false;
+          }
+          return;
+        }
+      } catch {
+        // keep trying briefly
+      }
     }
   })();
   const settingsThemePicker = document.getElementById('settingsThemePicker');
@@ -290,6 +313,10 @@
   const settingsSessionUser = document.getElementById('settingsSessionUser');
   const settingsSessionHomeserver = document.getElementById('settingsSessionHomeserver');
   const settingsNavLogoutBtn = document.getElementById('settingsNavLogoutBtn');
+  const settingsNavSearch = document.getElementById('settingsNavSearch');
+  const settingsNavAvatar = document.getElementById('settingsNavAvatar');
+  const settingsNavSearchEmpty = document.getElementById('settingsNavSearchEmpty');
+  const settingsNavList = document.querySelector('.settings-nav-list');
   const settingsVersion = document.getElementById('settingsVersion');
   const settingsPluginList = document.getElementById('settingsPluginList');
   const accountPreviewBanner = document.getElementById('accountPreviewBanner');
@@ -300,6 +327,13 @@
   const accountPreviewId = document.getElementById('accountPreviewId');
   const accountPreviewOnline = document.getElementById('accountPreviewOnline');
   const accountStatusBtn = document.getElementById('accountStatusBtn');
+  const accountStatusDialog = document.getElementById('accountStatusDialog');
+  const accountStatusForm = document.getElementById('accountStatusForm');
+  const accountStatusInput = document.getElementById('accountStatusInput');
+  const accountStatusError = document.getElementById('accountStatusError');
+  const accountStatusCancel = document.getElementById('accountStatusCancel');
+  const accountStatusClear = document.getElementById('accountStatusClear');
+  const accountStatusSave = document.getElementById('accountStatusSave');
   const accountPreviewServer = document.getElementById('accountPreviewServer');
   const accountPreviewShareBtn = document.getElementById('accountPreviewShareBtn');
   const accountPreviewRole = document.getElementById('accountPreviewRole');
@@ -321,8 +355,12 @@
   const styleRemoveBtn = document.getElementById('styleRemoveBtn');
   const styleNameGradStart = document.getElementById('styleNameGradStart');
   const styleNameGradEnd = document.getElementById('styleNameGradEnd');
-  const styleNamePreviewPlate = document.getElementById('styleNamePreviewPlate');
-  const styleNamePreviewText = document.getElementById('styleNamePreviewText');
+  const styleNamePreviewDark = document.getElementById('styleNamePreviewDark');
+  const styleNamePreviewLight = document.getElementById('styleNamePreviewLight');
+  const styleNameGradStartHex = document.getElementById('styleNameGradStartHex');
+  const styleNameGradEndHex = document.getElementById('styleNameGradEndHex');
+  const usernameColorsSaveBtn = document.getElementById('usernameColorsSaveBtn');
+  const usernameColorsRemoveBtn = document.getElementById('usernameColorsRemoveBtn');
   const nameplatePicker = document.getElementById('nameplatePicker');
   const blockUserInput = document.getElementById('blockUserInput');
   const blockUserBtn = document.getElementById('blockUserBtn');
@@ -425,6 +463,14 @@
   const forumPostCancel = document.getElementById('forumPostCancel');
   const forumPostSubmit = document.getElementById('forumPostSubmit');
   const createChildDialog = document.getElementById('createChildDialog');
+  const addExistingRoomDialog = document.getElementById('addExistingRoomDialog');
+  const addExistingRoomForm = document.getElementById('addExistingRoomForm');
+  const addExistingRoomSearch = document.getElementById('addExistingRoomSearch');
+  const addExistingRoomList = document.getElementById('addExistingRoomList');
+  const addExistingRoomError = document.getElementById('addExistingRoomError');
+  const addExistingRoomCancel = document.getElementById('addExistingRoomCancel');
+  const addExistingRoomCancelBtn = document.getElementById('addExistingRoomCancelBtn');
+  const addExistingRoomSubmit = document.getElementById('addExistingRoomSubmit');
   const createChildForm = document.getElementById('createChildForm');
   const createChildTitle = document.getElementById('createChildTitle');
   const createChildLede = document.getElementById('createChildLede');
@@ -577,10 +623,18 @@
   const removeUnverifiedDevicesBtn = document.getElementById('removeUnverifiedDevicesBtn');
   const clearCacheBtn = document.getElementById('clearCacheBtn');
   const aboutSourceCodeBtn = document.getElementById('aboutSourceCodeBtn');
+  const aboutUpdateStatus = document.getElementById('aboutUpdateStatus');
+  const aboutCheckUpdatesBtn = document.getElementById('aboutCheckUpdatesBtn');
+  const aboutInstallUpdateBtn = document.getElementById('aboutInstallUpdateBtn');
+  const whatsNewDialog = document.getElementById('whatsNewDialog');
+  const whatsNewVersion = document.getElementById('whatsNewVersion');
+  const whatsNewTitle = document.getElementById('whatsNewTitle');
+  const whatsNewDate = document.getElementById('whatsNewDate');
+  const whatsNewBody = document.getElementById('whatsNewBody');
+  const whatsNewGotItBtn = document.getElementById('whatsNewGotItBtn');
+  const whatsNewCloseBtn = document.getElementById('whatsNewCloseBtn');
   const protocolHandlerStatus = document.getElementById('protocolHandlerStatus');
   const protocolRepairBtn = document.getElementById('protocolRepairBtn');
-  const mobileCompanionUrls = document.getElementById('mobileCompanionUrls');
-  const mobileCompanionRefreshBtn = document.getElementById('mobileCompanionRefreshBtn');
   const protocolRefreshBtn = document.getElementById('protocolRefreshBtn');
   const prefAutoConvertEmoticons = document.getElementById('prefAutoConvertEmoticons');
   const defaultPackName = document.getElementById('defaultPackName');
@@ -646,7 +700,11 @@
   let activityCursor = 0;
   let activityReady = false;
   let notifClickUnsub = null;
-  let activeSpaceFilter = localStorage.getItem('relay.space') || 'dms';
+  let activeSpaceFilter = (() => {
+    const stored = localStorage.getItem('relay.space') || 'dms';
+    // Legacy "All rooms" (home) is folded into the Kitsu Direct Messages tab.
+    return stored === 'home' ? 'dms' : stored;
+  })();
   let spaceCatalog = [];
   let roomCatalog = [];
   /** @type {Map<string, string>} */
@@ -1207,23 +1265,6 @@
     }
   }
 
-  async function refreshMobileCompanionStatus() {
-    if (!mobileCompanionUrls) return;
-    try {
-      const health = await api('/api/health');
-      const urls = Array.isArray(health.lanAddresses) ? health.lanAddresses.filter(Boolean) : [];
-      if (!urls.length) {
-        mobileCompanionUrls.textContent =
-          'No LAN address found yet. Check Wi‑Fi, then Refresh. Default port is 6080.';
-        return;
-      }
-      mobileCompanionUrls.textContent = urls.join('\n');
-      mobileCompanionUrls.style.whiteSpace = 'pre-wrap';
-    } catch (error) {
-      mobileCompanionUrls.textContent = error.message || String(error);
-    }
-  }
-
   async function refreshAboutSettings() {
     try {
       const health = await api('/api/health');
@@ -1242,7 +1283,167 @@
       }
     }
     await refreshProtocolHandlerStatus();
-    await refreshMobileCompanionStatus();
+    await refreshDesktopUpdateStatus();
+  }
+
+  let whatsNewShownThisSession = false;
+  let whatsNewOpenVersion = null;
+  let desktopUpdateStatus = { state: 'idle' };
+
+  function formatWhatsNewDate(value) {
+    if (!value) return '';
+    const parsed = Date.parse(String(value));
+    if (Number.isNaN(parsed)) return String(value);
+    return new Date(parsed).toLocaleDateString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    });
+  }
+
+  function closeWhatsNewDialog() {
+    if (whatsNewDialog?.open) whatsNewDialog.close();
+  }
+
+  function markWhatsNewSeen(version) {
+    if (!version) return;
+    localStorage.setItem('kitsu.whatsNewSeen', String(version));
+  }
+
+  function renderWhatsNewEntry(entry, version) {
+    if (!whatsNewDialog || !whatsNewBody) return;
+    whatsNewOpenVersion = version;
+    if (whatsNewVersion) whatsNewVersion.textContent = `Kitsu ${version}`;
+    if (whatsNewTitle) {
+      whatsNewTitle.textContent = entry?.title || 'Updates in this release';
+      whatsNewTitle.hidden = !whatsNewTitle.textContent;
+    }
+    if (whatsNewDate) {
+      const label = formatWhatsNewDate(entry?.date);
+      whatsNewDate.textContent = label;
+      whatsNewDate.hidden = !label;
+    }
+    whatsNewBody.innerHTML = '';
+    for (const section of entry?.sections || []) {
+      const block = document.createElement('section');
+      block.className = 'whats-new-section';
+      if (section?.heading) {
+        const heading = document.createElement('h3');
+        heading.textContent = section.heading;
+        block.appendChild(heading);
+      }
+      if (section?.body) {
+        const body = document.createElement('p');
+        body.textContent = section.body;
+        block.appendChild(body);
+      }
+      if (Array.isArray(section?.bullets) && section.bullets.length) {
+        const list = document.createElement('ul');
+        for (const item of section.bullets) {
+          const li = document.createElement('li');
+          li.textContent = item;
+          list.appendChild(li);
+        }
+        block.appendChild(list);
+      }
+      whatsNewBody.appendChild(block);
+    }
+    if (typeof whatsNewDialog.showModal === 'function') whatsNewDialog.showModal();
+  }
+
+  async function maybeShowWhatsNew({ force = false } = {}) {
+    if (whatsNewShownThisSession && !force) return;
+    let version = '';
+    try {
+      if (window.relayDesktop?.getAppInfo) {
+        const info = await window.relayDesktop.getAppInfo();
+        version = info?.version || '';
+      }
+      if (!version) {
+        const health = await api('/api/health');
+        version = health?.version || '';
+      }
+    } catch {
+      return;
+    }
+    if (!version) return;
+    const seen = localStorage.getItem('kitsu.whatsNewSeen');
+    if (!force && seen === version) return;
+
+    let entry = null;
+    try {
+      const res = await fetch('/changelog.json', { cache: 'no-store' });
+      const data = await res.json().catch(() => ({}));
+      entry = data?.entries?.[version] || null;
+    } catch {
+      entry = null;
+    }
+    if (!entry && !force) return;
+
+    whatsNewShownThisSession = true;
+    renderWhatsNewEntry(
+      entry || {
+        title: 'Updated',
+        date: new Date().toISOString().slice(0, 10),
+        sections: [
+          {
+            heading: 'Thanks for updating',
+            body: `You're now on Kitsu ${version}.`,
+          },
+        ],
+      },
+      version,
+    );
+  }
+
+  function applyDesktopUpdateStatus(status = {}) {
+    desktopUpdateStatus = { ...desktopUpdateStatus, ...status };
+    if (!aboutUpdateStatus) return;
+    const current = desktopUpdateStatus.currentVersion || '';
+    if (desktopUpdateStatus.state === 'dev') {
+      aboutUpdateStatus.textContent = 'Updates are only available in the packaged desktop app.';
+    } else if (desktopUpdateStatus.state === 'checking') {
+      aboutUpdateStatus.textContent = 'Checking for updates…';
+    } else if (desktopUpdateStatus.state === 'available') {
+      aboutUpdateStatus.textContent = `Update ${desktopUpdateStatus.version || ''} found — downloading…`.trim();
+    } else if (desktopUpdateStatus.state === 'downloading') {
+      aboutUpdateStatus.textContent = `Downloading update… ${desktopUpdateStatus.progress ?? 0}%`;
+    } else if (desktopUpdateStatus.state === 'ready') {
+      aboutUpdateStatus.textContent = `Update ${desktopUpdateStatus.version || ''} is ready. Restart to install.`.trim();
+    } else if (desktopUpdateStatus.state === 'error') {
+      aboutUpdateStatus.textContent = desktopUpdateStatus.error || 'Could not check for updates.';
+    } else {
+      aboutUpdateStatus.textContent = current
+        ? `You're on the latest release (${current}).`
+        : "You're on the latest release.";
+    }
+    if (aboutInstallUpdateBtn) {
+      aboutInstallUpdateBtn.hidden = desktopUpdateStatus.state !== 'ready';
+    }
+    if (aboutCheckUpdatesBtn) {
+      aboutCheckUpdatesBtn.disabled = desktopUpdateStatus.state === 'checking';
+    }
+  }
+
+  async function refreshDesktopUpdateStatus() {
+    if (!window.relayDesktop?.getUpdateStatus) {
+      applyDesktopUpdateStatus({ state: 'dev' });
+      return;
+    }
+    try {
+      const status = await window.relayDesktop.getUpdateStatus();
+      applyDesktopUpdateStatus(status || {});
+    } catch (error) {
+      applyDesktopUpdateStatus({ state: 'error', error: error.message || String(error) });
+    }
+  }
+
+  function initDesktopUpdater() {
+    if (!window.relayDesktop?.onUpdateStatus) return;
+    window.relayDesktop.onUpdateStatus((status) => {
+      applyDesktopUpdateStatus(status || {});
+    });
+    void refreshDesktopUpdateStatus();
   }
 
   async function refreshProtocolHandlerStatus() {
@@ -1479,11 +1680,14 @@
       const date = new Date(ts);
       const hour24 = readBoolPref('relay.hour24', false);
       const time = date.toLocaleTimeString(appLocale(), {
-        hour: '2-digit',
+        hour: 'numeric',
         minute: '2-digit',
         hour12: !hour24,
       });
-      return `${formatMessageDayLabel(date)} ${time}`;
+      const dayLabel = formatMessageDayLabel(date);
+      if (dayLabel === 'Today') return time;
+      const dateStr = formatDatePart(date, readStringPref('relay.dateFormat', 'D/MM/YYYY'));
+      return `${dateStr}, ${time}`;
     } catch {
       return '';
     }
@@ -3001,13 +3205,10 @@
         localStorage.removeItem('relay.lastRoomId');
         return;
       }
-      const preferredSpace =
-        localStorage.getItem('relay.lastRoomSpace') ||
-        (room.isDirect ? 'dms' : 'home');
-      const nextSpace = room.isDirect
-        ? 'dms'
-        : preferredSpace === 'dms'
-          ? 'home'
+      const preferredSpace = localStorage.getItem('relay.lastRoomSpace') || 'dms';
+      const nextSpace =
+        room.isDirect || preferredSpace === 'home' || preferredSpace === 'dms'
+          ? 'dms'
           : preferredSpace;
       if (nextSpace !== activeSpaceFilter) {
         activeSpaceFilter = nextSpace;
@@ -3059,8 +3260,10 @@
       }
     }
 
-    if (room?.isDirect && activeSpaceFilter !== 'dms') setSpaceFilter('dms');
-    else if (room && !room.isDirect && activeSpaceFilter === 'dms') setSpaceFilter('home');
+    const targetFilter = room?.spaceFilter || (room?.isDirect ? 'dms' : null);
+    if (targetFilter && targetFilter !== activeSpaceFilter) {
+      void setSpaceFilter(targetFilter, { openFirst: false });
+    }
 
     activeRoomId = roomId;
     persistLastRoom(roomId);
@@ -3589,6 +3792,7 @@
     const q = String(token.query || '').toLowerCase();
     if (token.kind === '@') {
       return roomMembersCache
+        .filter((m) => !isSelfUserId(m.userId))
         .filter((m) => {
           const name = String(m.displayName || m.userId || '').toLowerCase();
           const id = String(m.userId || '').toLowerCase();
@@ -4350,14 +4554,9 @@
     profileUser = null;
   }
 
-  function bannerStyleForUser(userId) {
-    let hash = 0;
-    for (const ch of String(userId || '')) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
-    const hue = hash % 360;
-    return `
-      repeating-linear-gradient(-35deg, rgba(0,0,0,0.55) 0 2px, rgba(255,255,255,0.06) 2px 4px),
-      linear-gradient(135deg, hsl(${hue} 35% 18%), hsl(${(hue + 40) % 360} 30% 10%) 55%, hsl(${(hue + 80) % 360} 25% 14%))
-    `;
+  function bannerStyleForUser(_userId) {
+    // Match app chrome — no per-user color wash on the profile banner.
+    return '';
   }
 
   function nameColorForUser(userId) {
@@ -4424,6 +4623,21 @@
     }
   }
 
+  function isAppThemeLight() {
+    return document.documentElement.classList.contains('theme-scheme-light');
+  }
+
+  function colorFromPreference(style) {
+    const pref = style?.colorPreference;
+    if (pref && typeof pref === 'object') {
+      const onDark = pref.on_dark || pref.onDark || null;
+      const onLight = pref.on_light || pref.onLight || null;
+      if (isAppThemeLight()) return onLight || onDark || null;
+      return onDark || onLight || null;
+    }
+    return style?.color || null;
+  }
+
   function applyUsernameStyle(senderEl, style, { fallbackColor = '' } = {}) {
     if (!senderEl) return;
     const wrap = senderEl.closest('.sender-nameplate');
@@ -4432,25 +4646,14 @@
 
     clearUsernameStyle(senderEl);
 
-    // Paarrot: solid accent from avatar tEXt `paarrot:color`
-    if (style?.color) {
-      senderEl.style.color = style.color;
-      return;
-    }
-
-    const start = style?.nameGradientStart;
-    const end = style?.nameGradientEnd;
-    if (start && end) {
-      senderEl.classList.add('sender--gradient');
-      senderEl.style.backgroundImage = `linear-gradient(90deg, ${start}, ${end})`;
-      senderEl.style.webkitBackgroundClip = 'text';
-      senderEl.style.backgroundClip = 'text';
-      senderEl.style.webkitTextFillColor = 'transparent';
-      senderEl.style.color = 'transparent';
-      return;
-    }
-    if (start) {
-      senderEl.style.color = start;
+    // Solid accent only (MSC4522 on_dark / on_light). No username text gradients.
+    const accent =
+      colorFromPreference(style) ||
+      style?.nameGradientStart ||
+      style?.color ||
+      null;
+    if (accent) {
+      senderEl.style.color = accent;
       return;
     }
     if (fallbackColor) senderEl.style.color = fallbackColor;
@@ -4516,14 +4719,30 @@
           ]);
           const style = {
             ...(profile.style || {}),
+            colorPreference:
+              profile.style?.colorPreference ||
+              profile.colorPreference ||
+              (colorsRes?.colors?.color
+                ? {
+                    on_dark: colorsRes.colors.color,
+                    on_light: colorsRes.colors.color,
+                  }
+                : null),
             color:
+              profile.style?.color ||
               colorsRes?.colors?.color ||
               profile.paarrotColors?.color ||
-              profile.style?.color ||
               null,
           };
           rememberSenderStyle(userId, style);
-          if (style.color || style.nameplate || style.nameGradientStart) changed = true;
+          if (
+            style.color ||
+            style.colorPreference ||
+            style.nameplate ||
+            style.nameGradientStart
+          ) {
+            changed = true;
+          }
         } catch {
           rememberSenderStyle(userId, null);
         }
@@ -4550,32 +4769,34 @@
       userProfileName.textContent = profile.displayName || 'User';
       const mergedStyle = {
         ...(profile.style || {}),
-        color: profile.paarrotColors?.color || profile.style?.color || null,
+        colorPreference: profile.style?.colorPreference || profile.colorPreference || null,
+        color: profile.style?.color || profile.paarrotColors?.color || null,
       };
       rememberSenderStyle(profile.userId, mergedStyle);
       applyUsernameStyle(userProfileName, mergedStyle, {
         fallbackColor: profile.isSelf ? 'var(--lavender)' : nameColorForUser(profile.userId),
       });
       userProfileId.textContent = profile.userId || '';
-      userProfileId.style.color = profile.isSelf
-        ? 'color-mix(in srgb, var(--lavender) 70%, white)'
-        : '';
+      const nameAccent =
+        colorFromPreference(mergedStyle) ||
+        mergedStyle.color ||
+        (profile.isSelf ? null : nameColorForUser(profile.userId));
+      if (profile.isSelf) {
+        userProfileId.style.color = 'color-mix(in srgb, var(--lavender) 70%, white)';
+      } else if (nameAccent) {
+        userProfileId.style.color = nameAccent;
+        userProfileId.style.opacity = '0.72';
+      } else {
+        userProfileId.style.color = '';
+        userProfileId.style.opacity = '';
+      }
       userProfileOnline.hidden = !profile.online;
 
-      // Banner color/gradient always under optional banner image (image may fail on phone)
-      userProfileBanner.style.background = bannerStyleForUser(profile.userId);
+      // Banner: real image when set; otherwise neutral UI strip (no profile color wash).
+      userProfileBanner.style.background = '';
       userProfileBannerImg.hidden = true;
       userProfileBannerImg.removeAttribute('src');
       userProfileBannerImg.classList.remove('is-avatar-fill');
-      if (profile.style?.gradientStart && profile.style?.gradientEnd) {
-        const angle = Number(profile.style.gradientAngle) || 180;
-        userProfileBanner.style.background = `linear-gradient(${angle}deg, ${profile.style.gradientStart}, ${profile.style.gradientEnd})`;
-      } else if (profile.paarrotColors?.gradient?.startColor && profile.paarrotColors?.gradient?.stopColor) {
-        const dir = profile.paarrotColors.gradient.direction || '180deg';
-        userProfileBanner.style.background = `linear-gradient(${dir}, ${profile.paarrotColors.gradient.startColor}, ${profile.paarrotColors.gradient.stopColor})`;
-      } else if (profile.paarrotColors?.color || profile.style?.color) {
-        userProfileBanner.style.background = profile.paarrotColors?.color || profile.style.color;
-      }
       if (profile.bannerUrl) {
         userProfileBannerImg.hidden = false;
         userProfileBannerImg.onerror = () => {
@@ -4593,18 +4814,30 @@
         userProfileStatus.textContent = '';
       }
 
-      userProfileServer.innerHTML = profile.server
-        ? `<span aria-hidden="true">⬡</span> ${profile.server}`
-        : '';
-      userProfileServer.hidden = !profile.server;
+      if (profile.server) {
+        userProfileServer.hidden = false;
+        userProfileServer.innerHTML = `
+          <svg class="user-profile-chip-icon ui-icon ui-icon--stroke" viewBox="0 0 24 24" aria-hidden="true">
+            <ellipse cx="12" cy="6" rx="7" ry="3"/>
+            <path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/>
+            <path d="M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/>
+          </svg>
+          <span></span>
+        `;
+        userProfileServer.querySelector('span').textContent = profile.server;
+      } else {
+        userProfileServer.hidden = true;
+        userProfileServer.replaceChildren();
+      }
 
       if (profile.role) {
         userProfileRole.hidden = false;
         userProfileRole.classList.add('user-profile-chip--role');
-        userProfileRole.innerHTML = `<span aria-hidden="true">●</span> ${profile.role}`;
+        userProfileRole.innerHTML = `<span class="user-profile-chip-dot" aria-hidden="true"></span><span></span>`;
+        userProfileRole.querySelector('span:last-child').textContent = profile.role;
       } else {
         userProfileRole.hidden = true;
-        userProfileRole.textContent = '';
+        userProfileRole.replaceChildren();
       }
 
       // Paarrot: own profile has no Message button — just identity + chips
@@ -4612,7 +4845,7 @@
       userProfileMoreBtn.hidden = Boolean(profile.isSelf);
       if (!profile.isSelf) {
         userProfileMessageBtn.disabled = false;
-        userProfileMessageBtn.innerHTML = '<span aria-hidden="true">💬</span> Message';
+        userProfileMessageBtn.innerHTML = userProfileMessageMarkup();
       }
 
       const showFallback = () => {
@@ -5141,6 +5374,13 @@
     applyProvisionalThemeTokens(known);
     ensureThemeSwatchesMounted();
     syncThemeSwatchSelection(coerceTheme(localStorage.getItem('relay.theme') || 'dark'));
+    // MSC4522: username accents switch between on_dark / on_light with the theme.
+    try {
+      reapplySenderStylesInTimeline();
+      updateStylePreview();
+    } catch {
+      // styles may not be ready during early boot
+    }
 
     void ensureRemoteThemeCss(next).then(() => {
       if (document.documentElement.dataset.theme === next) {
@@ -5214,16 +5454,41 @@
   }
 
   function currentStyleFromInputs() {
+    const onDark = styleNameGradStart?.value || null;
+    const onLight = styleNameGradEnd?.value || null;
     return {
       avatarBorder: hexToRgba(styleBorderColor.value, styleBorderAlpha.value),
       gradientStart: styleGradStart.value,
       gradientEnd: styleGradEnd.value,
       gradientAngle: Number(styleGradAngle.value) || 180,
       nameplate: selectedNameplate || null,
-      nameGradientStart: styleNameGradStart?.value || null,
-      nameGradientEnd: styleNameGradEnd?.value || null,
-      color: styleNameGradStart?.value || null,
+      nameGradientStart: onDark,
+      nameGradientEnd: onLight,
+      color: onDark || onLight,
+      colorPreference:
+        onDark || onLight
+          ? {
+              on_dark: onDark || onLight,
+              on_light: onLight || onDark,
+            }
+          : null,
     };
+  }
+
+  function updateUsernameColorPreviews() {
+    const onDark = styleNameGradStart?.value || '#B78EE4';
+    const onLight = styleNameGradEnd?.value || '#8A4DBF';
+    const name = accountPreviewName?.textContent?.trim() || 'Username';
+    if (styleNamePreviewDark) {
+      styleNamePreviewDark.textContent = name;
+      styleNamePreviewDark.style.color = onDark;
+    }
+    if (styleNamePreviewLight) {
+      styleNamePreviewLight.textContent = name;
+      styleNamePreviewLight.style.color = onLight;
+    }
+    if (styleNameGradStartHex) styleNameGradStartHex.textContent = onDark.toUpperCase();
+    if (styleNameGradEndHex) styleNameGradEndHex.textContent = onLight.toUpperCase();
   }
 
   function updateStylePreview() {
@@ -5233,12 +5498,9 @@
     const avatar = accountPreviewAvatar.hidden ? accountPreviewAvatarFallback : accountPreviewAvatar;
     avatar.style.boxShadow = `0 0 0 3px ${style.avatarBorder}`;
     if (accountPreviewBannerImg.hidden) {
-      accountPreviewBanner.style.background = `linear-gradient(${style.gradientAngle}deg, ${style.gradientStart}, ${style.gradientEnd})`;
+      accountPreviewBanner.style.background = '';
     }
-    if (styleNamePreviewText) {
-      styleNamePreviewText.textContent = accountPreviewName.textContent || 'Username';
-      applyUsernameStyle(styleNamePreviewText, style);
-    }
+    updateUsernameColorPreviews();
     applyUsernameStyle(accountPreviewName, style, { fallbackColor: 'var(--text)' });
   }
 
@@ -5249,14 +5511,16 @@
       userProfileCard.style.background = '';
       return;
     }
+    // Colored ring sits outside the cutout border (Paarrot uses dark frame + optional accent).
     if (style.avatarBorder) {
-      userProfileAvatar.style.boxShadow = `0 0 0 3px ${style.avatarBorder}`;
-      userProfileAvatarFallback.style.boxShadow = `0 0 0 3px ${style.avatarBorder}`;
+      userProfileAvatar.style.boxShadow = `0 0 0 2px ${style.avatarBorder}`;
+      userProfileAvatarFallback.style.boxShadow = `0 0 0 2px ${style.avatarBorder}`;
+    } else {
+      userProfileAvatar.style.boxShadow = '';
+      userProfileAvatarFallback.style.boxShadow = '';
     }
-    if (style.gradientStart && style.gradientEnd) {
-      const angle = Number(style.gradientAngle) || 180;
-      userProfileCard.style.background = `linear-gradient(${angle}deg, ${style.gradientStart}, ${style.gradientEnd})`;
-    }
+    // Card body stays solid — no profile gradient wash.
+    userProfileCard.style.background = '';
   }
 
   function renderBlockedUsers(ids) {
@@ -5293,10 +5557,25 @@
       if (accountDisplayNameInput) {
         accountDisplayNameInput.value = account.displayName || '';
       }
-      accountPreviewServer.textContent = account.server || '';
-      accountPreviewServer.hidden = !account.server;
-      accountStatusBtn.textContent = account.statusMsg || 'Click to set a custom status…';
-      accountStatusBtn.classList.toggle('is-empty', !account.statusMsg);
+      if (account.server) {
+        accountPreviewServer.hidden = false;
+        accountPreviewServer.innerHTML = `
+          <svg class="user-profile-chip-icon ui-icon ui-icon--stroke" viewBox="0 0 24 24" aria-hidden="true">
+            <ellipse cx="12" cy="6" rx="7" ry="3"/>
+            <path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/>
+            <path d="M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/>
+          </svg>
+          <span></span>
+        `;
+        accountPreviewServer.querySelector('span').textContent = account.server;
+      } else {
+        accountPreviewServer.hidden = true;
+        accountPreviewServer.replaceChildren();
+      }
+      if (accountStatusBtn) {
+        accountStatusBtn.textContent = account.statusMsg || 'Click to set a custom status…';
+        accountStatusBtn.classList.toggle('is-empty', !account.statusMsg);
+      }
       rememberSelfPresence(account.presence || (account.online ? 'online' : 'offline'));
 
       const emails = Array.isArray(account.emails)
@@ -5314,9 +5593,12 @@
 
       if (account.role) {
         accountPreviewRole.hidden = false;
-        accountPreviewRole.textContent = account.role;
+        accountPreviewRole.innerHTML =
+          `<span class="user-profile-chip-dot" aria-hidden="true"></span><span></span>`;
+        accountPreviewRole.querySelector('span:last-child').textContent = account.role;
       } else {
         accountPreviewRole.hidden = true;
+        accountPreviewRole.replaceChildren();
       }
 
       const showFallback = () => {
@@ -5339,37 +5621,35 @@
       } else {
         accountPreviewBannerImg.hidden = true;
         accountPreviewBannerImg.removeAttribute('src');
-        const grad = account.paarrotColors?.gradient;
-        if (grad?.startColor && grad?.stopColor) {
-          accountPreviewBanner.style.background = `linear-gradient(${grad.direction || '180deg'}, ${grad.startColor}, ${grad.stopColor})`;
-        } else if (account.style?.gradientStart && account.style?.gradientEnd) {
-          const angle = Number(account.style.gradientAngle) || 180;
-          accountPreviewBanner.style.background = `linear-gradient(${angle}deg, ${account.style.gradientStart}, ${account.style.gradientEnd})`;
-        } else if (account.paarrotColors?.color) {
-          accountPreviewBanner.style.background = account.paarrotColors.color;
-        }
+        accountPreviewBanner.style.background = '';
       }
 
       const style = account.style || {};
       rememberSenderStyle(account.userId, {
         ...style,
-        color: account.paarrotColors?.color || style.color || null,
+        colorPreference: style.colorPreference || account.colorPreference || null,
+        color: style.color || account.paarrotColors?.color || null,
       });
       if (style.gradientStart?.startsWith('#')) styleGradStart.value = style.gradientStart.slice(0, 7);
       if (style.gradientEnd?.startsWith('#')) styleGradEnd.value = style.gradientEnd.slice(0, 7);
       if (Number.isFinite(Number(style.gradientAngle))) styleGradAngle.value = String(style.gradientAngle);
-      const accent = account.paarrotColors?.color || style.color;
-      if (accent?.startsWith('#')) {
-        styleNameGradStart.value = accent.slice(0, 7);
-        styleNameGradEnd.value = (account.paarrotColors?.gradient?.stopColor || accent).slice(0, 7);
-      } else {
-        if (style.nameGradientStart?.startsWith('#')) styleNameGradStart.value = style.nameGradientStart.slice(0, 7);
-        if (style.nameGradientEnd?.startsWith('#')) styleNameGradEnd.value = style.nameGradientEnd.slice(0, 7);
-      }
-      if (account.paarrotColors?.gradient?.startColor?.startsWith('#')) {
+      const onDark =
+        style.colorPreference?.on_dark ||
+        style.nameGradientStart ||
+        style.color ||
+        account.paarrotColors?.color;
+      const onLight =
+        style.colorPreference?.on_light ||
+        style.nameGradientEnd ||
+        style.colorPreference?.on_dark ||
+        account.paarrotColors?.gradient?.stopColor ||
+        onDark;
+      if (onDark?.startsWith('#')) styleNameGradStart.value = onDark.slice(0, 7);
+      if (onLight?.startsWith('#')) styleNameGradEnd.value = onLight.slice(0, 7);
+      if (account.paarrotColors?.gradient?.startColor?.startsWith('#') && !style.gradientStart) {
         styleGradStart.value = account.paarrotColors.gradient.startColor.slice(0, 7);
       }
-      if (account.paarrotColors?.gradient?.stopColor?.startsWith('#')) {
+      if (account.paarrotColors?.gradient?.stopColor?.startsWith('#') && !style.gradientEnd) {
         styleGradEnd.value = account.paarrotColors.gradient.stopColor.slice(0, 7);
       }
       setNameplateSelection(style.nameplate || '');
@@ -5464,12 +5744,52 @@
     }
   }
 
+  function filterSettingsNav(query = '') {
+    const q = String(query || '').trim().toLowerCase();
+    let visible = 0;
+    for (const button of document.querySelectorAll('.settings-nav-item[data-settings-tab]')) {
+      const label = button.querySelector('.settings-nav-label')?.textContent || button.textContent || '';
+      const haystack = `${label} ${button.dataset.settingsSearch || ''} ${button.dataset.settingsTab || ''}`.toLowerCase();
+      const match = !q || haystack.includes(q);
+      button.classList.toggle('is-filtered-out', !match);
+      if (match) visible += 1;
+    }
+    if (settingsNavSearchEmpty) settingsNavSearchEmpty.hidden = visible > 0;
+    if (settingsNavList) settingsNavList.hidden = visible === 0;
+  }
+
+  function syncSettingsNavAvatar(session) {
+    if (!settingsNavAvatar) return;
+    settingsNavAvatar.replaceChildren();
+    if (session?.hasAvatar !== false && session?.avatarUrl) {
+      const img = document.createElement('img');
+      img.alt = '';
+      img.decoding = 'async';
+      img.referrerPolicy = 'no-referrer';
+      img.src = session.avatarUrl;
+      img.addEventListener(
+        'error',
+        () => {
+          settingsNavAvatar.textContent = initials(session.displayName || session.userId || '?');
+        },
+        { once: true },
+      );
+      settingsNavAvatar.appendChild(img);
+      return;
+    }
+    settingsNavAvatar.textContent = initials(session?.displayName || session?.userId || '?');
+  }
+
   async function openSettings({ tab = 'general', fromSecurity = false } = {}) {
     settingsOpen = true;
     closeMessageSearch();
     hideAccountMenu();
     chatMain.hidden = true;
     settingsView.hidden = false;
+    if (settingsNavSearch) {
+      settingsNavSearch.value = '';
+      filterSettingsNav('');
+    }
     if (fromSecurity) {
       railAccountBtn.classList.remove('is-active');
       railSecurityBtn?.classList.add('is-active');
@@ -5479,6 +5799,7 @@
     }
     // Paint known session immediately so General never flashes "Not signed in".
     applySettingsSession(lastSessionState);
+    syncSettingsNavAvatar(lastSessionState);
     setSettingsTab(tab);
     if (tab !== 'general') await refreshSettingsSession();
     try {
@@ -5501,6 +5822,19 @@
     button.addEventListener('click', () => setSettingsTab(button.dataset.settingsTab));
   }
 
+  settingsNavSearch?.addEventListener('input', () => {
+    filterSettingsNav(settingsNavSearch.value);
+  });
+
+  settingsNavSearch?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    const first = document.querySelector(
+      '.settings-nav-item[data-settings-tab]:not(.is-filtered-out)',
+    );
+    if (first?.dataset?.settingsTab) setSettingsTab(first.dataset.settingsTab);
+  });
+
   function updateAccountAvatar(session) {
     if (session?.connected && session?.userId) {
       lastSessionState = session;
@@ -5517,6 +5851,7 @@
     railAccountBtn.setAttribute('aria-label', 'Settings');
     accountMenuName.textContent = session.displayName || session.userId || 'Account';
     accountMenuId.textContent = session.userId || '';
+    syncSettingsNavAvatar(session);
 
     railAccountOrb.replaceChildren();
     if (session.hasAvatar !== false && session.avatarUrl) {
@@ -5789,21 +6124,99 @@
     }
   });
 
-  accountStatusBtn.addEventListener('click', async () => {
-    const next = window.prompt(
-      'Custom status',
-      accountStatusBtn.classList.contains('is-empty') ? '' : accountStatusBtn.textContent,
-    );
-    if (next == null) return;
+  usernameColorsSaveBtn?.addEventListener('click', async () => {
     try {
-      await api('/api/account/status', {
-        method: 'POST',
-        body: JSON.stringify({ statusMsg: next }),
+      const style = currentStyleFromInputs();
+      await api('/api/account/style', {
+        method: 'PUT',
+        body: JSON.stringify({ style }),
       });
       await refreshAccountSettings();
+      if (activeRoomId) void refreshMessages(activeRoomId, { quiet: true });
     } catch (error) {
       window.alert(error.message || String(error));
     }
+  });
+
+  usernameColorsRemoveBtn?.addEventListener('click', async () => {
+    try {
+      const style = currentStyleFromInputs();
+      style.nameGradientStart = null;
+      style.nameGradientEnd = null;
+      style.color = null;
+      style.colorPreference = null;
+      style.colors = null;
+      await api('/api/account/style', {
+        method: 'PUT',
+        body: JSON.stringify({ style }),
+      });
+      styleNameGradStart.value = '#B78EE4';
+      styleNameGradEnd.value = '#8A4DBF';
+      updateStylePreview();
+      await refreshAccountSettings();
+      if (activeRoomId) void refreshMessages(activeRoomId, { quiet: true });
+    } catch (error) {
+      window.alert(error.message || String(error));
+    }
+  });
+
+  function closeAccountStatusDialog() {
+    if (accountStatusDialog?.open) accountStatusDialog.close();
+  }
+
+  function setAccountStatusError(message = '') {
+    if (!accountStatusError) return;
+    accountStatusError.textContent = message;
+    accountStatusError.hidden = !message;
+  }
+
+  function openAccountStatusDialog() {
+    if (!accountStatusDialog || !accountStatusInput) return;
+    const current = accountStatusBtn?.classList.contains('is-empty')
+      ? ''
+      : String(accountStatusBtn?.textContent || '').trim();
+    accountStatusInput.value = current;
+    setAccountStatusError('');
+    if (accountStatusSave) accountStatusSave.disabled = false;
+    if (typeof accountStatusDialog.showModal === 'function') {
+      accountStatusDialog.showModal();
+      accountStatusInput.focus();
+      accountStatusInput.select();
+    }
+  }
+
+  async function submitAccountStatus(statusMsg) {
+    if (accountStatusSave) accountStatusSave.disabled = true;
+    setAccountStatusError('');
+    try {
+      await api('/api/account/status', {
+        method: 'POST',
+        body: JSON.stringify({ statusMsg }),
+      });
+      closeAccountStatusDialog();
+      await refreshAccountSettings();
+    } catch (error) {
+      setAccountStatusError(error.message || String(error));
+    } finally {
+      if (accountStatusSave) accountStatusSave.disabled = false;
+    }
+  }
+
+  accountStatusBtn?.addEventListener('click', () => {
+    openAccountStatusDialog();
+  });
+
+  accountStatusForm?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    await submitAccountStatus(String(accountStatusInput?.value || '').trim());
+  });
+
+  accountStatusCancel?.addEventListener('click', () => {
+    closeAccountStatusDialog();
+  });
+
+  accountStatusClear?.addEventListener('click', async () => {
+    await submitAccountStatus('');
   });
 
   accountDisplayNameSaveBtn?.addEventListener('click', async () => {
@@ -5838,12 +6251,31 @@
     }
   });
 
+  function shareChipMarkup(label = 'Share') {
+    return `
+      <svg class="user-profile-chip-icon ui-icon ui-icon--stroke" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M10 13a5 5 0 0 0 7.07 0l1.41-1.41a5 5 0 0 0-7.07-7.07L10 5.93"/>
+        <path d="M14 11a5 5 0 0 0-7.07 0L5.52 12.4a5 5 0 0 0 7.07 7.07L14 18.07"/>
+      </svg>
+      <span>${label}</span>
+    `;
+  }
+
+  function userProfileMessageMarkup() {
+    return `
+      <svg class="user-profile-message-icon ui-icon ui-icon--stroke" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.4 8.4 0 0 1 3.8-.9h.5a8.5 8.5 0 0 1 8 8v.5z"/>
+      </svg>
+      <span>Message</span>
+    `;
+  }
+
   accountPreviewShareBtn.addEventListener('click', async () => {
     try {
       await navigator.clipboard.writeText(`https://matrix.to/#/${accountMatrixId.textContent || ''}`);
       accountPreviewShareBtn.textContent = 'Copied';
       setTimeout(() => {
-        accountPreviewShareBtn.textContent = 'Share';
+        accountPreviewShareBtn.innerHTML = shareChipMarkup('Share');
       }, 1000);
     } catch (error) {
       window.alert(error.message || String(error));
@@ -6353,6 +6785,7 @@
     } else {
       syncMobileNavOverlay();
     }
+    void maybeShowWhatsNew();
   }
 
   function roomLabel(roomId) {
@@ -7476,6 +7909,10 @@
     callTimerInterval = setInterval(tick, 1000);
   }
 
+  function isSelfUserId(userId) {
+    return Boolean(userId && sessionUserId && userId === sessionUserId);
+  }
+
   function displayNameForUser(userId) {
     if (!userId || userId === 'peer') return voipPeerLabel || 'Peer';
     if (userId === sessionUserId) {
@@ -7991,6 +8428,36 @@
     }
   }
 
+  function patchDmPresenceForUser(userId, presence) {
+    const id = String(userId || '').trim();
+    if (!id || !roomList) return;
+    const online = presence === 'online';
+    for (const room of roomCatalog) {
+      if (!room?.isDirect || room.dmUserId !== id) continue;
+      room.presence = presence;
+      room.online = online;
+      const row = roomList.querySelector(`.room-item[data-room-id="${CSS.escape(room.roomId)}"]`);
+      if (!row) continue;
+      const media = row.querySelector('.room-media');
+      if (!media) continue;
+      let bar = media.querySelector('.room-online');
+      if (online) {
+        if (!bar) {
+          bar = document.createElement('span');
+          bar.className = 'room-online';
+          bar.title = 'Online';
+          bar.setAttribute('aria-label', 'Online');
+          media.insertBefore(bar, media.firstChild);
+        }
+        media.classList.add('room-media--online');
+      } else {
+        bar?.remove();
+        media.classList.remove('room-media--online');
+      }
+    }
+    if (activeRoomId) scheduleLiveMessageRefresh(activeRoomId);
+  }
+
   function startLiveStream() {
     stopLiveStream();
     if (typeof EventSource === 'undefined') return;
@@ -8016,6 +8483,10 @@
       }
       if (data?.kind === 'session' && data.connected === false) {
         void confirmLoggedOut();
+        return;
+      }
+      if (data?.kind === 'presence' && data.userId) {
+        patchDmPresenceForUser(data.userId, data.presence || 'offline');
         return;
       }
       // First sync finished (or catch-up after restart) — force a full timeline reload.
@@ -8343,33 +8814,43 @@
         void ensureMarkdown().catch(() => {});
         void ensureLiveKit().catch(() => {});
         // Wait for Matrix client sync (PREPARED) before first room fetch.
-        // Server can take up to ~45s on first sync after restart.
-        for (let attempt = 0; attempt < 300; attempt += 1) {
+        // Server can take a while on first sync after restart — stay on chat chrome
+        // while connected/restoring instead of dumping back to the login screen.
+        for (let attempt = 0; attempt < 600; attempt += 1) {
           try {
             const live = await api('/api/session');
             if (live?.ready) {
               session = live;
               break;
             }
-            // Restore finished without a live client — don't sit on empty chat forever.
-            if (live && !live.connected && !live.restoring) {
+            if (live?.connected || live?.restoring) {
+              session = live;
+              // Still signing back in — keep waiting.
+            } else if (live && !live.connected && !live.restoring) {
               session = live;
               break;
             }
-            if (live?.connected) session = live;
           } catch {
             // keep waiting
           }
           await new Promise((resolve) => setTimeout(resolve, 150));
         }
         if (!session?.ready) {
-          console.warn('[relay] session never became ready', session?.error || '');
-          showLogin('bootstrap:restore-failed');
-          if (loginError && session?.error) {
-            setLoginError(`Session restore failed: ${session.error}`);
+          if (session?.connected || session?.restoring) {
+            console.warn(
+              '[relay] session still restoring after wait; staying in chat UI',
+              session?.error || '',
+            );
+            showChat(session);
+          } else {
+            console.warn('[relay] session never became ready', session?.error || '');
+            showLogin('bootstrap:restore-failed');
+            if (loginError && session?.error) {
+              setLoginError(`Session restore failed: ${session.error}`);
+            }
+            void loadThemes().catch(() => {});
+            return;
           }
-          void loadThemes().catch(() => {});
-          return;
         }
         if (session?.userId && session.userId !== sessionUserId) {
           showChat(session);
@@ -8430,8 +8911,7 @@
   });
 
   function spaceLabel(filter) {
-    if (filter === 'home') return 'All rooms';
-    if (filter === 'dms') return 'Direct Messages';
+    if (filter === 'home' || filter === 'dms') return 'Home';
     const space = spaceCatalog.find((entry) => entry.spaceId === filter);
     if (space?.name) return space.name;
     const cached = spaceNameCache.get(filter);
@@ -8666,7 +9146,7 @@
       setSpaceFilter(entry.id);
       return;
     }
-    const targetSpace = entry.isDirect ? 'dms' : 'home';
+    const targetSpace = 'dms';
     if (activeSpaceFilter !== targetSpace) {
       activeSpaceFilter = targetSpace;
       localStorage.setItem('relay.space', activeSpaceFilter);
@@ -10460,10 +10940,11 @@
   }
 
   async function openFirstRoomInCatalog({ retries = 25, delayMs = 150 } = {}) {
-    // Ensure the Chats section is expanded so the selection is visible.
+    // Ensure home sections are expanded so the selection is visible.
     if (activeSpaceFilter === 'dms') {
-      const sectionId = `flat:${activeSpaceFilter}`;
-      if (isRoomFolderClosed(sectionId)) setRoomFolderClosed(sectionId, false);
+      for (const sectionId of ['flat:dms', 'flat:rooms']) {
+        if (isRoomFolderClosed(sectionId)) setRoomFolderClosed(sectionId, false);
+      }
     }
 
     for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -10491,7 +10972,7 @@
     closeMessageSearch();
     closeCreateChat();
     closeExplore();
-    const next = filter || 'dms';
+    const next = filter === 'home' ? 'dms' : filter || 'dms';
     // Opening Direct Messages always selects the first chat unless explicitly disabled
     // (e.g. creating a DM and jumping to that specific room).
     const shouldOpenFirst =
@@ -11343,7 +11824,7 @@
       await navigator.clipboard.writeText(profileUser.permalink);
       userProfileShareBtn.textContent = 'Copied';
       setTimeout(() => {
-        userProfileShareBtn.innerHTML = '<span aria-hidden="true">🔗</span> Share';
+        userProfileShareBtn.innerHTML = shareChipMarkup('Share');
       }, 1200);
     } catch (error) {
       window.alert(error.message || String(error));
@@ -11380,7 +11861,7 @@
     } finally {
       userProfileMessageBtn.disabled = false;
       if (profileUser && !profileUser.isSelf) {
-        userProfileMessageBtn.innerHTML = '<span aria-hidden="true">💬</span> Message';
+        userProfileMessageBtn.innerHTML = userProfileMessageMarkup();
       }
     }
   });
@@ -11432,6 +11913,8 @@
       } else if (action === 'remove-from-folder') {
         removeSpaceFromFolder(spaceId);
         renderSpaceRail(spaceCatalog);
+      } else if (action === 'add-existing-room') {
+        void openAddExistingRoomDialog(spaceId);
       } else if (action === 'invite') {
         openInviteDialog({ kind: 'space', id: spaceId, name: space?.name || 'space' });
       } else if (action === 'copy-link') {
@@ -11584,6 +12067,181 @@
     }
   });
 
+  let addExistingRoomParentId = null;
+  let addExistingRoomCandidates = [];
+  let addExistingRoomSelectedId = null;
+
+  function setAddExistingRoomError(message = '') {
+    if (!addExistingRoomError) return;
+    addExistingRoomError.textContent = message;
+    addExistingRoomError.hidden = !message;
+  }
+
+  function closeAddExistingRoomDialog() {
+    if (addExistingRoomDialog?.open) addExistingRoomDialog.close();
+    addExistingRoomParentId = null;
+    addExistingRoomCandidates = [];
+    addExistingRoomSelectedId = null;
+  }
+
+  function renderAddExistingRoomList(query = '') {
+    if (!addExistingRoomList) return;
+    addExistingRoomList.replaceChildren();
+    const q = String(query || '').trim().toLowerCase();
+    const filtered = addExistingRoomCandidates.filter((room) => {
+      if (!q) return true;
+      const hay = `${room.name || ''} ${room.canonicalAlias || room.alias || ''} ${room.roomId || ''}`.toLowerCase();
+      return hay.includes(q);
+    });
+    if (!filtered.length) {
+      const empty = document.createElement('li');
+      empty.className = 'add-existing-room-empty';
+      empty.textContent = addExistingRoomCandidates.length
+        ? 'No matching rooms'
+        : 'No joined rooms available to add';
+      addExistingRoomList.appendChild(empty);
+      if (addExistingRoomSubmit) addExistingRoomSubmit.disabled = true;
+      return;
+    }
+    for (const room of filtered) {
+      const li = document.createElement('li');
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `add-existing-room-item${
+        room.roomId === addExistingRoomSelectedId ? ' is-selected' : ''
+      }`;
+      btn.setAttribute('role', 'option');
+      btn.setAttribute(
+        'aria-selected',
+        room.roomId === addExistingRoomSelectedId ? 'true' : 'false',
+      );
+      if (room.hasAvatar !== false && room.avatarUrl) {
+        const img = document.createElement('img');
+        img.className = 'add-existing-room-avatar';
+        img.alt = '';
+        img.draggable = false;
+        img.referrerPolicy = 'no-referrer';
+        img.src = room.avatarUrl;
+        btn.appendChild(img);
+      } else {
+        const fallback = document.createElement('span');
+        fallback.className = 'add-existing-room-fallback';
+        fallback.textContent = initials(room.name || room.roomId || '?');
+        btn.appendChild(fallback);
+      }
+      const copy = document.createElement('span');
+      copy.className = 'add-existing-room-copy';
+      const name = document.createElement('span');
+      name.className = 'add-existing-room-name';
+      name.textContent = room.name || room.roomId;
+      const meta = document.createElement('span');
+      meta.className = 'add-existing-room-meta';
+      meta.textContent = room.isSpace
+        ? room.canonicalAlias || room.alias || 'Space'
+        : room.canonicalAlias || room.alias || room.roomId;
+      copy.appendChild(name);
+      copy.appendChild(meta);
+      btn.appendChild(copy);
+      btn.addEventListener('click', () => {
+        addExistingRoomSelectedId = room.roomId;
+        if (addExistingRoomSubmit) addExistingRoomSubmit.disabled = false;
+        renderAddExistingRoomList(addExistingRoomSearch?.value || '');
+      });
+      btn.addEventListener('dblclick', () => {
+        addExistingRoomSelectedId = room.roomId;
+        void submitAddExistingRoom();
+      });
+      li.appendChild(btn);
+      addExistingRoomList.appendChild(li);
+    }
+    if (addExistingRoomSubmit) {
+      addExistingRoomSubmit.disabled = !filtered.some(
+        (room) => room.roomId === addExistingRoomSelectedId,
+      );
+    }
+  }
+
+  async function openAddExistingRoomDialog(parentSpaceId = activeSpaceFilter) {
+    const parentId = String(parentSpaceId || '').trim();
+    if (!parentId.startsWith('!')) return;
+    hideRoomsPanelMenu();
+    hideRoomCategoryMenu();
+    hideSpaceMenu();
+    hideRoomMenu();
+    hideFolderMenu();
+    hideMessageMenu();
+    addExistingRoomParentId = parentId;
+    addExistingRoomSelectedId = null;
+    addExistingRoomCandidates = [];
+    setAddExistingRoomError('');
+    if (addExistingRoomSearch) addExistingRoomSearch.value = '';
+    if (addExistingRoomSubmit) {
+      addExistingRoomSubmit.disabled = true;
+      addExistingRoomSubmit.textContent = 'Add to space';
+    }
+    renderAddExistingRoomList('');
+    if (typeof addExistingRoomDialog?.showModal === 'function') {
+      addExistingRoomDialog.showModal();
+      addExistingRoomSearch?.focus();
+    }
+    try {
+      const data = await api(
+        `/api/spaces/${encodeURIComponent(parentId)}/addable-rooms`,
+      );
+      addExistingRoomCandidates = Array.isArray(data.rooms) ? data.rooms : [];
+      renderAddExistingRoomList(addExistingRoomSearch?.value || '');
+    } catch (error) {
+      setAddExistingRoomError(error.message || String(error));
+    }
+  }
+
+  async function submitAddExistingRoom() {
+    const parentId = addExistingRoomParentId;
+    const roomId = addExistingRoomSelectedId;
+    if (!parentId || !roomId) return;
+    setAddExistingRoomError('');
+    if (addExistingRoomSubmit) {
+      addExistingRoomSubmit.disabled = true;
+      addExistingRoomSubmit.textContent = 'Adding…';
+    }
+    try {
+      await api(`/api/spaces/${encodeURIComponent(parentId)}/children/link`, {
+        method: 'POST',
+        body: JSON.stringify({ roomId }),
+      });
+      closeAddExistingRoomDialog();
+      if (activeSpaceFilter !== parentId) {
+        await setSpaceFilter(parentId, { openFirst: false });
+      } else {
+        await refreshRooms();
+      }
+      await refreshRoomsUntilVisible(roomId, { attempts: 12 });
+    } catch (error) {
+      setAddExistingRoomError(
+        (error.message || String(error)).replace(/^MatrixError:\s*/i, ''),
+      );
+      if (addExistingRoomSubmit) {
+        addExistingRoomSubmit.disabled = false;
+        addExistingRoomSubmit.textContent = 'Add to space';
+      }
+    }
+  }
+
+  addExistingRoomCancel?.addEventListener('click', () => closeAddExistingRoomDialog());
+  addExistingRoomCancelBtn?.addEventListener('click', () => closeAddExistingRoomDialog());
+  addExistingRoomSearch?.addEventListener('input', () => {
+    renderAddExistingRoomList(addExistingRoomSearch.value);
+  });
+  addExistingRoomForm?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void submitAddExistingRoom();
+  });
+  addExistingRoomDialog?.addEventListener('close', () => {
+    addExistingRoomParentId = null;
+    addExistingRoomCandidates = [];
+    addExistingRoomSelectedId = null;
+  });
+
   roomsPanelContextMenu?.addEventListener('click', (event) => {
     const item = event.target.closest('[data-rooms-panel-action]');
     if (!item) return;
@@ -11596,6 +12254,8 @@
     const open = () => {
       if (action === 'create-channel') {
         openCreateChildDialog({ parentSpaceId, kind: 'room' });
+      } else if (action === 'add-existing-room') {
+        void openAddExistingRoomDialog(parentSpaceId);
       } else if (action === 'create-category') {
         openCreateChildDialog({
           parentSpaceId,
@@ -11619,6 +12279,8 @@
     const open = () => {
       if (action === 'create-channel') {
         openCreateChildDialog({ parentSpaceId: category.spaceId, kind: 'room' });
+      } else if (action === 'add-existing-room') {
+        void openAddExistingRoomDialog(category.spaceId);
       } else if (action === 'create-category') {
         openCreateChildDialog({
           parentSpaceId: category.spaceId,
@@ -12623,48 +13285,65 @@
         return;
       }
 
-      const section = document.createElement('li');
-      section.className = 'room-section-item';
-      const sectionId = `flat:${activeSpaceFilter}`;
-      const sectionClosed = isRoomFolderClosed(sectionId);
-      section.innerHTML = `
-        <button type="button" class="room-section${sectionClosed ? ' is-collapsed' : ''}" aria-expanded="${sectionClosed ? 'false' : 'true'}">
-          <span class="room-section-chevron" aria-hidden="true">${sectionClosed ? '▸' : '▾'}</span>
-          <span class="room-section-label"></span>
-        </button>
-      `;
-      section.querySelector('.room-section-label').textContent =
-        activeSpaceFilter === 'dms' ? 'Chats' : 'Rooms';
-      const flatSectionBtn = section.querySelector('.room-section');
-      flatSectionBtn?.addEventListener('click', () => {
-        setRoomFolderClosed(sectionId, !isRoomFolderClosed(sectionId));
-        void refreshRooms();
-      });
-      flatSectionBtn?.addEventListener('contextmenu', (event) => {
-        if (!String(activeSpaceFilter || '').startsWith('!')) return;
-        event.preventDefault();
-        event.stopPropagation();
-        showRoomsPanelMenu(event.clientX, event.clientY);
-      });
-      roomList.appendChild(section);
+      const appendFlatSection = (sectionId, label, sectionRooms, { showAvatarFor } = {}) => {
+        const section = document.createElement('li');
+        section.className = 'room-section-item';
+        const sectionClosed = isRoomFolderClosed(sectionId);
+        section.innerHTML = `
+          <button type="button" class="room-section${sectionClosed ? ' is-collapsed' : ''}" aria-expanded="${sectionClosed ? 'false' : 'true'}">
+            <span class="room-section-chevron" aria-hidden="true">${sectionClosed ? '▸' : '▾'}</span>
+            <span class="room-section-label"></span>
+          </button>
+        `;
+        section.querySelector('.room-section-label').textContent = label;
+        const flatSectionBtn = section.querySelector('.room-section');
+        flatSectionBtn?.addEventListener('click', () => {
+          setRoomFolderClosed(sectionId, !isRoomFolderClosed(sectionId));
+          void refreshRooms();
+        });
+        roomList.appendChild(section);
 
-      if (rooms.length === 0) {
-        const empty = document.createElement('li');
-        empty.className = 'room-empty';
-        empty.textContent =
-          activeSpaceFilter === 'dms'
-            ? 'No direct messages yet'
-            : activeSpaceFilter === 'home'
-              ? 'No rooms yet'
-              : 'No rooms in this space';
-        roomList.appendChild(empty);
+        if (sectionClosed) return;
+        if (!sectionRooms.length) {
+          const empty = document.createElement('li');
+          empty.className = 'room-empty';
+          empty.textContent =
+            label === 'Direct Messages' ? 'No direct messages yet' : 'No rooms yet';
+          roomList.appendChild(empty);
+          return;
+        }
+        for (const room of sectionRooms) {
+          const showAvatar =
+            typeof showAvatarFor === 'function'
+              ? showAvatarFor(room)
+              : Boolean(room.isDirect) || Boolean(room.hasAvatar);
+          appendRoomRow(room, { showAvatar });
+        }
+      };
+
+      if (activeSpaceFilter === 'dms') {
+        const dmRooms = rooms.filter((room) => room.isDirect);
+        const channelRooms = rooms.filter((room) => !room.isDirect);
+        appendFlatSection('flat:dms', 'Direct Messages', dmRooms, {
+          showAvatarFor: () => true,
+        });
+        appendFlatSection('flat:rooms', 'Rooms', channelRooms, {
+          showAvatarFor: (room) => Boolean(room.hasAvatar),
+        });
+        if (lobbyOpen && String(activeSpaceFilter).startsWith('!')) renderLobby();
+        if (forumOpen && String(activeSpaceFilter).startsWith('!')) void loadForumBoard({ quiet: true });
         return;
       }
 
-      if (sectionClosed) return;
-      for (const room of rooms) {
-        appendRoomRow(room, { showAvatar: activeSpaceFilter === 'dms' || Boolean(room.isDirect) });
-      }
+      const sectionId = `flat:${activeSpaceFilter}`;
+      appendFlatSection(
+        sectionId,
+        'Rooms',
+        rooms,
+        {
+          showAvatarFor: (room) => Boolean(room.isDirect) || Boolean(room.hasAvatar),
+        },
+      );
       if (lobbyOpen && String(activeSpaceFilter).startsWith('!')) renderLobby();
       if (forumOpen && String(activeSpaceFilter).startsWith('!')) void loadForumBoard({ quiet: true });
     } catch (error) {
@@ -12796,7 +13475,7 @@
 
   if (typeof ResizeObserver === 'function') {
     const messageResizeObserver = new ResizeObserver(() => {
-      if (messagePaintLock > 0) return;
+      if (suppressMessageListAutoScroll > 0 || messagePaintLock > 0) return;
       // Typing/autosize shrinks the list by ~1px — don't scroll while composing.
       if (document.activeElement === composerInput) return;
       if (stickMessagesToBottom) scrollMessagesToBottom({ force: true });
@@ -14040,6 +14719,7 @@
     img.loading = mediaAutoLoadDisabled() ? 'lazy' : 'eager';
     img.referrerPolicy = 'no-referrer';
     img.decoding = 'async';
+    img.draggable = false;
 
     if (info.blurhash && window.RelayBlurhash?.toDataUrl) {
       const placeholder = window.RelayBlurhash.toDataUrl(info.blurhash, 32, 32);
@@ -14047,6 +14727,7 @@
         const ph = document.createElement('img');
         ph.className = 'message-image-blurhash';
         ph.alt = '';
+        ph.draggable = false;
         ph.src = placeholder;
         frame.appendChild(ph);
       }
@@ -14702,6 +15383,29 @@
     return [...types].includes('Files');
   }
 
+  /** True when the drop is a re-drag of media already shown in this window. */
+  function isInternalMediaUriDrop(dataTransfer) {
+    let uri = '';
+    try {
+      uri = String(
+        dataTransfer?.getData?.('text/uri-list') || dataTransfer?.getData?.('text/plain') || '',
+      ).trim();
+    } catch {
+      return false;
+    }
+    if (!uri) return false;
+    const first = uri.split('\n').map((line) => line.trim()).find((line) => line && !line.startsWith('#'));
+    if (!first) return false;
+    try {
+      const parsed = new URL(first, window.location.href);
+      if (parsed.origin === window.location.origin) return true;
+      if (parsed.protocol === 'blob:') return true;
+    } catch {
+      if (first.startsWith('/') || first.includes('/media/')) return true;
+    }
+    return false;
+  }
+
   function applyOptimisticRedaction(eventId) {
     const id = String(eventId || '').trim();
     if (!id || !messageList) return;
@@ -15033,6 +15737,57 @@
     return patchedAny;
   }
 
+  function captureMessageScrollAnchor() {
+    if (!messageList) return null;
+    const listTop = messageList.getBoundingClientRect().top;
+    const anchor = [...messageList.querySelectorAll('[data-event-id]')].find((el) => {
+      const rect = el.getBoundingClientRect();
+      return rect.bottom > listTop + 8;
+    });
+    if (!anchor?.dataset?.eventId) {
+      return {
+        eventId: null,
+        offset: 0,
+        scrollTop: messageList.scrollTop,
+        scrollHeight: messageList.scrollHeight,
+      };
+    }
+    return {
+      eventId: anchor.dataset.eventId,
+      offset: anchor.getBoundingClientRect().top - listTop,
+      scrollTop: messageList.scrollTop,
+      scrollHeight: messageList.scrollHeight,
+    };
+  }
+
+  function restoreMessageScrollAnchor(anchor) {
+    if (!messageList || !anchor) return false;
+    scrollingMessagesProgrammatically = true;
+    suppressMessageListAutoScroll += 1;
+    let restored = false;
+    if (anchor.eventId) {
+      const el = messageList.querySelector(`[data-event-id="${CSS.escape(anchor.eventId)}"]`);
+      if (el) {
+        const listTop = messageList.getBoundingClientRect().top;
+        const delta = el.getBoundingClientRect().top - listTop - (anchor.offset || 0);
+        messageList.scrollTop += delta;
+        restored = true;
+      }
+    }
+    if (!restored && Number.isFinite(anchor.scrollHeight) && Number.isFinite(anchor.scrollTop)) {
+      const delta = messageList.scrollHeight - anchor.scrollHeight;
+      messageList.scrollTop = Math.max(0, anchor.scrollTop + delta);
+      restored = true;
+    }
+    requestAnimationFrame(() => {
+      suppressMessageListAutoScroll = Math.max(0, suppressMessageListAutoScroll - 1);
+      scrollingMessagesProgrammatically = false;
+      stickMessagesToBottom = isMessageListNearBottom();
+      updateJumpToLatestBtn();
+    });
+    return restored;
+  }
+
   async function refreshMessages(
     roomId,
     {
@@ -15055,6 +15810,7 @@
     if (history) historyLoadingRoomId = roomId;
     void ensureMarkdown().catch(() => {});
     let paintedMessages = false;
+    let restoredScroll = false;
     try {
       let data;
       if (Array.isArray(presetMessages)) {
@@ -15127,25 +15883,23 @@
         return;
       }
 
-      let anchorId = null;
-      let anchorOffset = 0;
-      if (preserveScroll && messageList) {
-        const listTop = messageList.getBoundingClientRect().top;
-        const anchor = [...messageList.querySelectorAll('[data-event-id]')].find((el) => {
-          const rect = el.getBoundingClientRect();
-          return rect.bottom > listTop + 8;
-        });
-        if (anchor?.dataset?.eventId) {
-          anchorId = anchor.dataset.eventId;
-          anchorOffset = anchor.getBoundingClientRect().top - listTop;
-        }
+      let scrollAnchor = null;
+      const roomChanged = messageScrollRoomId !== roomId;
+      // Keep the viewport stable whenever we are not intentionally pinning to bottom.
+      // Quiet mid-history refreshes used to wipe the list and land at scrollTop=0.
+      const shouldPreserveScroll =
+        preserveScroll ||
+        (!pinBottom && !roomChanged && !stickMessagesToBottom);
+      if (shouldPreserveScroll && messageList) {
+        scrollAnchor = captureMessageScrollAnchor();
       }
 
-      const roomChanged = messageScrollRoomId !== roomId;
-      if ((pinBottom || roomChanged || !quiet) && !preserveScroll) {
+      const previousContentFingerprint = lastMessagesContentFingerprint;
+      // Don't claim "stuck to bottom" just because this refresh isn't quiet — mid-history
+      // rebuilds must not flip stick on and yank the viewport.
+      if ((pinBottom || roomChanged) && !shouldPreserveScroll) {
         stickMessagesToBottom = true;
       }
-      const previousContentFingerprint = lastMessagesContentFingerprint;
       messageScrollRoomId = roomId;
 
       const roomMeta = roomCatalog.find((entry) => entry.roomId === roomId);
@@ -15154,14 +15908,14 @@
       const domEventIds = timelineDomEventIds();
       const tailAppend =
         !history &&
-        !preserveScroll &&
+        !shouldPreserveScroll &&
         !roomChanged &&
         canTailAppendTimeline(domEventIds, displayMessages);
 
       if (
         !tailAppend &&
         !history &&
-        !preserveScroll &&
+        !shouldPreserveScroll &&
         !roomChanged &&
         patchTimelineMessagesInPlace(displayMessages, messages)
       ) {
@@ -15175,7 +15929,7 @@
       if (
         !tailAppend &&
         !history &&
-        !preserveScroll &&
+        !shouldPreserveScroll &&
         contentFingerprint === previousContentFingerprint &&
         messageScrollRoomId === roomId
       ) {
@@ -15197,8 +15951,11 @@
       if (tailAppend) {
         paintStartIndex = domEventIds.length;
       } else {
+        // Capture again right before wipe in case DOM mutated since the earlier snapshot.
+        if (shouldPreserveScroll && !scrollAnchor) scrollAnchor = captureMessageScrollAnchor();
         messagePaintLock += 1;
         paintedMessages = true;
+        suppressMessageListAutoScroll += 1;
         messageList.innerHTML = '';
         applyMessageLayoutPrefs();
         if (timelineAtStart) {
@@ -15396,7 +16153,6 @@
         if (!continued) {
           const senderEl = el.querySelector('.sender');
           senderEl.textContent = displayName;
-          senderEl.title = msg.sender ? `Mention ${msg.sender}` : `Mention ${displayName}`;
           const mxidEl = el.querySelector('.sender-mxid');
           if (mxidEl && msg.sender) mxidEl.textContent = msg.sender;
           const senderStyle =
@@ -15411,12 +16167,17 @@
           applyUsernameStyle(senderEl, senderStyle, {
             fallbackColor: msg.isMine ? 'var(--lavender)' : nameColorForUser(msg.sender),
           });
-          senderEl.addEventListener('click', (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            if (!msg.sender) return;
-            addMention({ userId: msg.sender, displayName });
-          });
+          if (msg.isMine || isSelfUserId(msg.sender)) {
+            senderEl.title = displayName;
+          } else {
+            senderEl.title = msg.sender ? `Mention ${msg.sender}` : `Mention ${displayName}`;
+            senderEl.addEventListener('click', (event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              if (!msg.sender) return;
+              addMention({ userId: msg.sender, displayName });
+            });
+          }
           el.querySelector('.when').textContent = when;
         }
 
@@ -15567,22 +16328,12 @@
         void markActiveRoomRead(roomId);
       }
 
-      if (preserveScroll && anchorId) {
-        scrollingMessagesProgrammatically = true;
-        const el = messageList.querySelector(`[data-event-id="${CSS.escape(anchorId)}"]`);
-        if (el) {
-          const listTop = messageList.getBoundingClientRect().top;
-          const delta = el.getBoundingClientRect().top - listTop - anchorOffset;
-          messageList.scrollTop += delta;
-        }
-        requestAnimationFrame(() => {
-          scrollingMessagesProgrammatically = false;
-          stickMessagesToBottom = isMessageListNearBottom();
-          updateJumpToLatestBtn();
-        });
+      if (shouldPreserveScroll && scrollAnchor && !tailAppend) {
+        restoredScroll = restoreMessageScrollAnchor(scrollAnchor);
+        if (!restoredScroll) updateJumpToLatestBtn();
       } else if (tailAppend && (pinBottom || stickMessagesToBottom)) {
         softPinMessagesToBottom();
-      } else if (pinBottom || !quiet || stickMessagesToBottom) {
+      } else if (pinBottom || (!quiet && !shouldPreserveScroll) || stickMessagesToBottom) {
         pinMessagesToBottom();
       } else {
         updateJumpToLatestBtn();
@@ -15595,7 +16346,9 @@
       }
       if (paintedMessages) {
         messagePaintLock = Math.max(0, messagePaintLock - 1);
-        if (messagePaintLock === 0 && stickMessagesToBottom) {
+        suppressMessageListAutoScroll = Math.max(0, suppressMessageListAutoScroll - 1);
+        // Never force-bottom after a preserved mid-history rebuild.
+        if (messagePaintLock === 0 && stickMessagesToBottom && !restoredScroll) {
           scrollMessagesToBottom({ force: true });
         }
       }
@@ -15605,6 +16358,7 @@
   async function loadOlderMessages() {
     if (!activeRoomId || loadingOlderMessages || timelineAtStart) return;
     loadingOlderMessages = true;
+    stickMessagesToBottom = false;
     const roomId = activeRoomId;
     const status = messageList?.querySelector('.timeline-history-status:not(.timeline-history-status--start)');
     if (status) status.textContent = 'Loading earlier messages…';
@@ -15613,6 +16367,7 @@
       let rounds = 0;
       let lastAdded = 0;
       while (rounds < 8 && activeRoomId === roomId && !timelineAtStart) {
+        stickMessagesToBottom = false;
         const displayLimit = Math.min(
           2500,
           Math.max(400, (activeRoomMessages.length || 0) + 200),
@@ -15631,10 +16386,12 @@
         await refreshMessages(roomId, {
           quiet: true,
           preserveScroll: true,
+          pinBottom: false,
           messages: data.messages || [],
           atStart: data.atStart,
           limit: displayLimit,
         });
+        stickMessagesToBottom = false;
         rounds += 1;
         // Stop chaining once the user has scrolled away from the top.
         if ((messageList?.scrollTop || 0) > 160) break;
@@ -15795,7 +16552,7 @@
   }
 
   function addMention({ userId, displayName }) {
-    if (!userId) return;
+    if (!userId || isSelfUserId(userId)) return;
     if (!composerForm.hidden) {
       // keep composer open
     } else if (activeRoomId) {
@@ -16427,6 +17184,21 @@
   });
 
   let fileDragDepth = 0;
+  // Block dragging sent images/icons (avoids dropping them back into the composer).
+  document.addEventListener('dragstart', (event) => {
+    const el = event.target;
+    if (!(el instanceof Element)) return;
+    // Room/space reorder still uses explicit draggable="true".
+    if (el.closest('[draggable="true"]')) return;
+    if (
+      el.matches('img, svg, video, canvas, picture') ||
+      el.closest(
+        '.message-list, .message, .shared-media-body, .room-pins-list, .composer-attachments, .composer-sticker-grid, .klipy-embed, .ui-icon',
+      )
+    ) {
+      event.preventDefault();
+    }
+  });
   document.addEventListener('dragenter', (event) => {
     if (!activeRoomId || !dataTransferHasFiles(event.dataTransfer)) return;
     event.preventDefault();
@@ -16449,6 +17221,11 @@
     fileDragDepth = 0;
     setComposerDropActive(false);
     if (!activeRoomId || !files.length) return;
+    // Ignore same-window image/URI re-drags that Chromium surfaces as Files.
+    if (isInternalMediaUriDrop(event.dataTransfer)) {
+      event.preventDefault();
+      return;
+    }
     event.preventDefault();
     stagePendingImages(files);
   });
@@ -16738,7 +17515,7 @@
       await refreshSpaces();
       const targetFilter =
         result.spaceFilter ||
-        (result.isDirect ? 'dms' : result.isSpace ? result.roomId : 'home');
+        (result.isDirect ? 'dms' : result.isSpace ? result.roomId : 'dms');
       if (activeSpaceFilter !== targetFilter) {
         await setSpaceFilter(targetFilter, { openFirst: false });
       } else {
@@ -17536,11 +18313,37 @@
       window.alert(error.message || String(error));
     }
   });
+  whatsNewGotItBtn?.addEventListener('click', () => {
+    markWhatsNewSeen(whatsNewOpenVersion);
+    closeWhatsNewDialog();
+  });
+  whatsNewCloseBtn?.addEventListener('click', () => {
+    markWhatsNewSeen(whatsNewOpenVersion);
+    closeWhatsNewDialog();
+  });
+  aboutCheckUpdatesBtn?.addEventListener('click', async () => {
+    if (!window.relayDesktop?.checkForUpdates) {
+      window.alert('Updates are only available in the packaged desktop app.');
+      return;
+    }
+    applyDesktopUpdateStatus({ state: 'checking', error: null });
+    try {
+      const status = await window.relayDesktop.checkForUpdates();
+      applyDesktopUpdateStatus(status || {});
+    } catch (error) {
+      applyDesktopUpdateStatus({ state: 'error', error: error.message || String(error) });
+    }
+  });
+  aboutInstallUpdateBtn?.addEventListener('click', async () => {
+    if (!window.relayDesktop?.installUpdate) return;
+    try {
+      await window.relayDesktop.installUpdate();
+    } catch (error) {
+      window.alert(error.message || String(error));
+    }
+  });
   protocolRefreshBtn?.addEventListener('click', () => {
     void refreshProtocolHandlerStatus();
-  });
-  mobileCompanionRefreshBtn?.addEventListener('click', () => {
-    void refreshMobileCompanionStatus();
   });
   protocolRepairBtn?.addEventListener('click', async () => {
     if (!window.relayDesktop?.repairProtocol) {
@@ -17717,10 +18520,12 @@
     wireDialogBackdropClose(dialog, () => {
       if (dialog === createSpaceDialog) closeCreateSpaceDialog();
       else if (dialog === joinRoomDialog) closeJoinDialog();
+      else if (dialog === addExistingRoomDialog) closeAddExistingRoomDialog();
       else if (dialog === createChildDialog) closeCreateChildDialog();
       else if (dialog === inviteUserDialog) closeInviteDialog();
       else if (dialog === cryptoSetupDialog) closeCryptoSetupDialog();
       else if (dialog === accountPasswordDialog) closeAccountPasswordDialog();
+      else if (dialog === accountStatusDialog) closeAccountStatusDialog();
       else if (dialog === appConfirmDialog) {
         if (dialog.open) dialog.close();
       } else if (dialog.open) dialog.close();
@@ -17728,6 +18533,7 @@
   }
 
   void bootstrap();
+  initDesktopUpdater();
 
   applySpellcheckPref();
 

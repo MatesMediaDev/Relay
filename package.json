@@ -4,6 +4,10 @@
   "private": true,
   "author": "ExcaliburAU",
   "description": "Kitsu — lean themeable Matrix desktop client with plugins",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ExcaliburAU/kitsu.git"
+  },
   "main": "electron/main.js",
   "scripts": {
     "start": "node server.js",
@@ -28,6 +32,7 @@
   "dependencies": {
     "abstract-level": "^1.0.4",
     "classic-level": "^1.4.1",
+    "electron-updater": "^6.8.9",
     "express": "^4.21.2",
     "level": "^8.0.1",
     "level-supports": "^4.0.1",
@@ -87,6 +92,13 @@
       "output": "dist",
       "buildResources": "build"
     },
+    "publish": {
+      "provider": "github",
+      "owner": "ExcaliburAU",
+      "repo": "kitsu",
+      "releaseType": "release"
+    },
+    "generateUpdatesFilesForAllChannels": true,
     "linux": {
       "icon": "build/icon.png",
       "artifactName": "Kitsu-${version}.${ext}",

@@ -1,0 +1,299 @@
+name: Build Desktop Artifacts
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish (optional, for manual releases)
+        required: false
+        type: string
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  auto-tag:
+    name: Auto Tag Release
+    if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/') && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+
+    outputs:
+      tag_created: ${{ steps.tagpush.outputs.created }}
+      release_tag: ${{ steps.bump.outputs.tag || steps.resolve.outputs.tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Resolve package version
+        id: resolve
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v${VERSION}"
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Resolved package version: ${VERSION}"
+          echo "Resolved tag: ${TAG}"
+
+      - name: Check if tag already exists
+        id: exists
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag ${TAG} already exists on origin."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Tag ${TAG} does not exist yet."
+          fi
+
+      - name: Bump patch when current tag exists
+        if: steps.exists.outputs.exists == 'true'
+        id: bump
+        run: |
+          npm version patch --no-git-tag-version
+
+          NEW_VERSION=$(node -p "require('./package.json').version")
+          NEW_TAG="v${NEW_VERSION}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json
+          git commit -m "chore(release): bump version to ${NEW_VERSION}"
+          git push origin "${GITHUB_REF_NAME}"
+
+          echo "tag=${NEW_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Bumped version to ${NEW_VERSION} and pushed commit."
+
+      - name: Create and push tag
+        id: tagpush
+        env:
+          TAG: ${{ steps.bump.outputs.tag || steps.resolve.outputs.tag }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            echo "Tag ${TAG} already exists on origin, skipping tag creation."
+            exit 0
+          fi
+
+          git fetch --tags --force
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "${TAG}"
+          git push origin "${TAG}"
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        env:
+          TAG: ${{ steps.bump.outputs.tag || steps.resolve.outputs.tag }}
+          EXISTS: ${{ steps.exists.outputs.exists }}
+          CREATED: ${{ steps.tagpush.outputs.created }}
+          REPO: ${{ github.repository }}
+          SERVER: ${{ github.server_url }}
+        run: |
+          {
+            echo "## Auto Tag Result"
+            echo ""
+            echo "- Target tag: ${TAG}"
+            echo "- Pre-existing version tag: ${EXISTS}"
+            echo "- New tag pushed this run: ${CREATED}"
+            echo ""
+            echo "## Build Status"
+            echo ""
+            echo "- Desktop build will start now"
+            echo "- Release page: ${SERVER}/${REPO}/releases"
+            echo "- Tag page: ${SERVER}/${REPO}/releases/tag/${TAG}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  validate-release:
+    name: Validate Release Tag
+    if: always() && !cancelled() && (startsWith(github.ref, 'refs/tags/') || github.event.inputs.tag || needs.auto-tag.outputs.tag_created == 'true')
+    needs: [auto-tag]
+    runs-on: ubuntu-latest
+
+    outputs:
+      release_tag: ${{ steps.resolve-tag.outputs.release_tag }}
+      is_release: ${{ steps.check-release.outputs.is_release }}
+
+    steps:
+      - name: Check if release build
+        id: check-release
+        run: echo "is_release=true" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve release tag
+        id: resolve-tag
+        run: |
+          if [ -n "${{ needs.auto-tag.outputs.release_tag }}" ]; then
+            echo "release_tag=${{ needs.auto-tag.outputs.release_tag }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "release_tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "release_tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.resolve-tag.outputs.release_tag }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Validate tag matches package version
+        env:
+          RELEASE_TAG: ${{ steps.resolve-tag.outputs.release_tag }}
+        run: |
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          EXPECTED_TAG="v${PACKAGE_VERSION}"
+
+          echo "Release tag: ${RELEASE_TAG}"
+          echo "Package version: ${PACKAGE_VERSION}"
+
+          if [ "${RELEASE_TAG}" != "${EXPECTED_TAG}" ]; then
+            echo "Tag/version mismatch: expected ${EXPECTED_TAG} from package.json, got ${RELEASE_TAG}" >&2
+            exit 1
+          fi
+
+  build-windows:
+    name: Build Windows (NSIS)
+    needs: [auto-tag, validate-release]
+    if: always() && !cancelled() && needs.validate-release.result == 'success'
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-release.outputs.release_tag }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Cache Electron
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Local\electron\Cache
+            ~\AppData\Local\electron-builder\Cache
+            ~\AppData\Local\electron-builder\cache
+          key: ${{ runner.os }}-electron-${{ hashFiles('package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-
+
+      - name: Install dependencies (with retry)
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: npm ci
+
+      - name: Build Windows installer (with retry)
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 20
+          max_attempts: 3
+          retry_wait_seconds: 120
+          shell: pwsh
+          command: npx electron-builder --win nsis --publish never
+
+      - name: Publish Windows assets to GitHub Release
+        if: needs.validate-release.outputs.is_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.validate-release.outputs.release_tag }}
+          name: ${{ needs.validate-release.outputs.release_tag }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.exe
+            dist/*.blockmap
+            dist/latest*.yml
+
+  build-linux:
+    name: Build Linux (AppImage)
+    needs: [auto-tag, validate-release]
+    if: always() && !cancelled() && needs.validate-release.result == 'success'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-release.outputs.release_tag }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Cache Electron
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+          key: ${{ runner.os }}-electron-${{ hashFiles('package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-
+
+      - name: Install dependencies (with retry)
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: npm ci
+
+      - name: Install AppImage build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libarchive-tools fakeroot rpm
+          sudo apt-get install -y libfuse2 || sudo apt-get install -y libfuse2t64
+
+      - name: Build Linux AppImage (with retry)
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 20
+          max_attempts: 3
+          retry_wait_seconds: 120
+          command: npx electron-builder --linux AppImage --publish never
+
+      - name: Publish Linux assets to GitHub Release
+        if: needs.validate-release.outputs.is_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.validate-release.outputs.release_tag }}
+          name: ${{ needs.validate-release.outputs.release_tag }}
+          generate_release_notes: true
+          fail_on_unmatched_files: false
+          files: |
+            dist/*.AppImage
+            dist/*.AppImage.zsync
+            dist/latest*.yml
+            public/changelog.json

@@ -1423,6 +1423,10 @@
     winUpdateBtn.setAttribute('aria-expanded', show ? 'true' : 'false');
   }
 
+  function shouldShowTitlebarUpdateIcon(state) {
+    return state === 'available' || state === 'downloading' || state === 'ready';
+  }
+
   function applyDesktopUpdateStatus(status = {}) {
     desktopUpdateStatus = { ...desktopUpdateStatus, ...status };
     if (!titlebarUpdateStatus) return;
@@ -1435,10 +1439,13 @@
 
     if (state === 'dev') {
       if (titlebarUpdateWrap) titlebarUpdateWrap.hidden = true;
+      setTitlebarUpdatePopoverOpen(false);
       return;
     }
 
-    if (titlebarUpdateWrap) titlebarUpdateWrap.hidden = false;
+    const showIcon = shouldShowTitlebarUpdateIcon(state);
+    if (titlebarUpdateWrap) titlebarUpdateWrap.hidden = !showIcon;
+    if (!showIcon) setTitlebarUpdatePopoverOpen(false);
 
     if (state === 'checking') {
       message = 'Checking for updates…';

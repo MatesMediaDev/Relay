@@ -5,7 +5,7 @@ Native shell around the Kitsu UI with **matrix-js-sdk** in the WebView. Logs int
 ## Install (Obtainium)
 
 1. Open Obtainium → Add App  
-2. Source: `https://github.com/ExcaliburAU/kitsu`  
+2. Source: `https://github.com/MatesMediaDev/Relay`  
 3. APK filter (optional): `Kitsu-.*\.apk`  
 4. Install from the latest release  
 

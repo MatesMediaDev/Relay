@@ -6,7 +6,7 @@
   "description": "Kitsu — lean themeable Matrix desktop client with plugins",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ExcaliburAU/kitsu.git"
+    "url": "https://github.com/MatesMediaDev/Relay.git"
   },
   "main": "electron/main.js",
   "scripts": {
@@ -94,8 +94,8 @@
     },
     "publish": {
       "provider": "github",
-      "owner": "ExcaliburAU",
-      "repo": "kitsu",
+      "owner": "MatesMediaDev",
+      "repo": "Relay",
       "releaseType": "release"
     },
     "generateUpdatesFilesForAllChannels": true,

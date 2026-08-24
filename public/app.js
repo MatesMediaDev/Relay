@@ -9,6 +9,13 @@
   const winMinimizeBtn = document.getElementById('winMinimizeBtn');
   const winMaximizeBtn = document.getElementById('winMaximizeBtn');
   const winCloseBtn = document.getElementById('winCloseBtn');
+  const titlebarUpdateWrap = document.getElementById('titlebarUpdateWrap');
+  const winUpdateBtn = document.getElementById('winUpdateBtn');
+  const titlebarUpdateBadge = document.getElementById('titlebarUpdateBadge');
+  const titlebarUpdatePopover = document.getElementById('titlebarUpdatePopover');
+  const titlebarUpdateStatus = document.getElementById('titlebarUpdateStatus');
+  const titlebarCheckUpdatesBtn = document.getElementById('titlebarCheckUpdatesBtn');
+  const titlebarInstallUpdateBtn = document.getElementById('titlebarInstallUpdateBtn');
 
   function isDesktopApp() {
     return Boolean(window.relayDesktop?.isDesktop);
@@ -42,6 +49,22 @@
     });
     winCloseBtn?.addEventListener('click', () => {
       void window.relayDesktop.windowAction?.('close');
+    });
+    winUpdateBtn?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      if (desktopUpdateStatus.state === 'ready') {
+        void window.relayDesktop?.installUpdate?.();
+        return;
+      }
+      setTitlebarUpdatePopoverOpen(Boolean(titlebarUpdatePopover?.hidden));
+    });
+    document.addEventListener('click', (event) => {
+      if (!titlebarUpdatePopover || titlebarUpdatePopover.hidden) return;
+      if (event.target?.closest?.('#titlebarUpdateWrap')) return;
+      setTitlebarUpdatePopoverOpen(false);
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') setTitlebarUpdatePopoverOpen(false);
     });
     desktopTitleBar?.addEventListener('dblclick', (event) => {
       if (event.target?.closest?.('.desktop-titlebar-controls')) return;
@@ -623,9 +646,6 @@
   const removeUnverifiedDevicesBtn = document.getElementById('removeUnverifiedDevicesBtn');
   const clearCacheBtn = document.getElementById('clearCacheBtn');
   const aboutSourceCodeBtn = document.getElementById('aboutSourceCodeBtn');
-  const aboutUpdateStatus = document.getElementById('aboutUpdateStatus');
-  const aboutCheckUpdatesBtn = document.getElementById('aboutCheckUpdatesBtn');
-  const aboutInstallUpdateBtn = document.getElementById('aboutInstallUpdateBtn');
   const whatsNewDialog = document.getElementById('whatsNewDialog');
   const whatsNewVersion = document.getElementById('whatsNewVersion');
   const whatsNewTitle = document.getElementById('whatsNewTitle');
@@ -1396,32 +1416,67 @@
     );
   }
 
+  function setTitlebarUpdatePopoverOpen(open) {
+    if (!titlebarUpdatePopover || !winUpdateBtn) return;
+    const show = Boolean(open);
+    titlebarUpdatePopover.hidden = !show;
+    winUpdateBtn.setAttribute('aria-expanded', show ? 'true' : 'false');
+  }
+
   function applyDesktopUpdateStatus(status = {}) {
     desktopUpdateStatus = { ...desktopUpdateStatus, ...status };
-    if (!aboutUpdateStatus) return;
+    if (!titlebarUpdateStatus) return;
+
     const current = desktopUpdateStatus.currentVersion || '';
-    if (desktopUpdateStatus.state === 'dev') {
-      aboutUpdateStatus.textContent = 'Updates are only available in the packaged desktop app.';
-    } else if (desktopUpdateStatus.state === 'checking') {
-      aboutUpdateStatus.textContent = 'Checking for updates…';
-    } else if (desktopUpdateStatus.state === 'available') {
-      aboutUpdateStatus.textContent = `Update ${desktopUpdateStatus.version || ''} found — downloading…`.trim();
-    } else if (desktopUpdateStatus.state === 'downloading') {
-      aboutUpdateStatus.textContent = `Downloading update… ${desktopUpdateStatus.progress ?? 0}%`;
-    } else if (desktopUpdateStatus.state === 'ready') {
-      aboutUpdateStatus.textContent = `Update ${desktopUpdateStatus.version || ''} is ready. Restart to install.`.trim();
-    } else if (desktopUpdateStatus.state === 'error') {
-      aboutUpdateStatus.textContent = desktopUpdateStatus.error || 'Could not check for updates.';
+    const state = desktopUpdateStatus.state || 'idle';
+    let message = '';
+    let title = 'Updates';
+    let showBadge = false;
+
+    if (state === 'dev') {
+      if (titlebarUpdateWrap) titlebarUpdateWrap.hidden = true;
+      return;
+    }
+
+    if (titlebarUpdateWrap) titlebarUpdateWrap.hidden = false;
+
+    if (state === 'checking') {
+      message = 'Checking for updates…';
+      title = 'Checking for updates…';
+    } else if (state === 'available') {
+      message = `Update ${desktopUpdateStatus.version || ''} found — downloading…`.trim();
+      title = 'Update downloading…';
+      showBadge = true;
+    } else if (state === 'downloading') {
+      message = `Downloading update… ${desktopUpdateStatus.progress ?? 0}%`;
+      title = `Downloading update… ${desktopUpdateStatus.progress ?? 0}%`;
+      showBadge = true;
+    } else if (state === 'ready') {
+      message = `Update ${desktopUpdateStatus.version || ''} is ready. Restart to install.`.trim();
+      title = 'Restart to update';
+      showBadge = true;
+    } else if (state === 'error') {
+      message = desktopUpdateStatus.error || 'Could not check for updates.';
+      title = 'Update check failed';
     } else {
-      aboutUpdateStatus.textContent = current
+      message = current
         ? `You're on the latest release (${current}).`
         : "You're on the latest release.";
+      title = 'Updates';
     }
-    if (aboutInstallUpdateBtn) {
-      aboutInstallUpdateBtn.hidden = desktopUpdateStatus.state !== 'ready';
+
+    titlebarUpdateStatus.textContent = message;
+    if (winUpdateBtn) {
+      winUpdateBtn.dataset.state = state;
+      winUpdateBtn.title = title;
+      winUpdateBtn.setAttribute('aria-label', title);
     }
-    if (aboutCheckUpdatesBtn) {
-      aboutCheckUpdatesBtn.disabled = desktopUpdateStatus.state === 'checking';
+    if (titlebarUpdateBadge) titlebarUpdateBadge.hidden = !showBadge;
+    if (titlebarInstallUpdateBtn) {
+      titlebarInstallUpdateBtn.hidden = state !== 'ready';
+    }
+    if (titlebarCheckUpdatesBtn) {
+      titlebarCheckUpdatesBtn.disabled = state === 'checking';
     }
   }
 
@@ -18321,7 +18376,7 @@
     markWhatsNewSeen(whatsNewOpenVersion);
     closeWhatsNewDialog();
   });
-  aboutCheckUpdatesBtn?.addEventListener('click', async () => {
+  titlebarCheckUpdatesBtn?.addEventListener('click', async () => {
     if (!window.relayDesktop?.checkForUpdates) {
       window.alert('Updates are only available in the packaged desktop app.');
       return;
@@ -18334,7 +18389,7 @@
       applyDesktopUpdateStatus({ state: 'error', error: error.message || String(error) });
     }
   });
-  aboutInstallUpdateBtn?.addEventListener('click', async () => {
+  titlebarInstallUpdateBtn?.addEventListener('click', async () => {
     if (!window.relayDesktop?.installUpdate) return;
     try {
       await window.relayDesktop.installUpdate();

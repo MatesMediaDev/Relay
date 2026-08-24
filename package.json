@@ -22,8 +22,6 @@
     "streamdeck:validate": "node streamdeck-plugin/validate.js",
     "streamdeck:build": "node streamdeck-plugin/build.js",
     "streamdeck:install": "node streamdeck-plugin/install-linux.js",
-    "mobile:sync": "npm --prefix mobile run sync",
-    "mobile:apk": "npm run build:matrix-browser && npm --prefix mobile run build:apk",
     "postinstall": "node scripts/build-markdown.mjs && node scripts/build-livekit.mjs",
     "dist:linux": "electron-builder --linux AppImage",
     "dist:win": "electron-builder --win nsis",

@@ -439,6 +439,85 @@ html.is-desktop .rail-presence-menu * {
   background: color-mix(in srgb, var(--text) 8%, transparent);
 }
 
+.desktop-titlebar-update-wrap {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+}
+
+.desktop-titlebar-btn--update {
+  position: relative;
+}
+
+.desktop-titlebar-btn--update[data-state='checking'] .desktop-titlebar-update-icon {
+  animation: titlebar-update-spin 0.9s linear infinite;
+}
+
+.desktop-titlebar-btn--update[data-state='available'],
+.desktop-titlebar-btn--update[data-state='downloading'],
+.desktop-titlebar-btn--update[data-state='ready'] {
+  color: var(--text);
+}
+
+.desktop-titlebar-btn--update[data-state='ready'] {
+  color: #23a559;
+}
+
+.desktop-titlebar-btn--update[data-state='error'] {
+  color: #f23f43;
+}
+
+.desktop-titlebar-update-badge {
+  position: absolute;
+  top: 0.45rem;
+  right: 0.45rem;
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 999px;
+  background: #23a559;
+  box-shadow: 0 0 0 1px var(--bg);
+}
+
+.desktop-titlebar-update-popover {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  right: 0;
+  z-index: 40;
+  min-width: 16rem;
+  max-width: 22rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.28);
+}
+
+.desktop-titlebar-update-popover[hidden] {
+  display: none;
+}
+
+.desktop-titlebar-update-status {
+  margin: 0 0 0.65rem;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: var(--text-soft);
+  word-break: break-word;
+}
+
+.desktop-titlebar-update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.35rem;
+}
+
+@keyframes titlebar-update-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .desktop-titlebar-btn--close:hover {
   background: #e81123;
   color: #fff;

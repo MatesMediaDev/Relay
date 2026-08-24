@@ -75,6 +75,31 @@
         </div>
         <div class="window-drag-strip desktop-titlebar-gap" aria-hidden="true"></div>
         <div class="desktop-titlebar-controls">
+          <div id="titlebarUpdateWrap" class="desktop-titlebar-update-wrap" hidden>
+            <button
+              type="button"
+              id="winUpdateBtn"
+              class="desktop-titlebar-btn desktop-titlebar-btn--update"
+              title="Updates"
+              aria-label="Updates"
+              aria-haspopup="true"
+              aria-expanded="false"
+              data-state="idle"
+            >
+              <svg class="desktop-titlebar-update-icon" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+                <path d="M6 1.75v5.5M6 7.25L3.75 5M6 7.25L8.25 5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M2.25 10.25h7.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              </svg>
+              <span id="titlebarUpdateBadge" class="desktop-titlebar-update-badge" hidden aria-hidden="true"></span>
+            </button>
+            <div id="titlebarUpdatePopover" class="desktop-titlebar-update-popover" hidden role="dialog" aria-label="App updates">
+              <p id="titlebarUpdateStatus" class="desktop-titlebar-update-status">Checking for updates…</p>
+              <div class="desktop-titlebar-update-actions">
+                <button type="button" id="titlebarCheckUpdatesBtn" class="ghost">Check now</button>
+                <button type="button" id="titlebarInstallUpdateBtn" class="ghost" hidden>Restart to update</button>
+              </div>
+            </div>
+          </div>
           <button type="button" id="winMinimizeBtn" class="desktop-titlebar-btn" title="Minimize" aria-label="Minimize">
             <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
               <rect y="5" width="12" height="2" fill="currentColor"/>
@@ -2647,22 +2672,6 @@
                       <span aria-hidden="true">&lt;/&gt;</span>
                       Source Code
                     </button>
-                  </div>
-                </section>
-
-                <section class="settings-block">
-                  <h3>Updates</h3>
-                  <div class="about-options-card">
-                    <div class="devtools-row">
-                      <div>
-                        <p class="settings-row-title">Desktop app updates</p>
-                        <p id="aboutUpdateStatus" class="settings-muted">Checking for updates…</p>
-                      </div>
-                      <div class="about-protocol-actions">
-                        <button type="button" id="aboutCheckUpdatesBtn" class="ghost">Check now</button>
-                        <button type="button" id="aboutInstallUpdateBtn" class="ghost" hidden>Restart to update</button>
-                      </div>
-                    </div>
                   </div>
                 </section>
 
